@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "role", "seniority", "language", "difficulty", "questions"],
+  "properties": {
+    "title": { "type": "string" },
+    "role": { "type": "string" },
+    "seniority": { "type": "string" },
+    "language": { "type": "string", "enum": ["es", "en"] },
+    "difficulty": { "type": "string", "enum": ["junior", "semi", "senior", "mixed"] },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "topic", "concept", "question", "options", "answer", "explanation"],
+        "properties": {
+          "id": { "type": "integer" },
+          "topic": { "type": "string" },
+          "concept": { "type": "string" },
+          "question": { "type": "string" },
+          "options": { "type": "array", "items": { "type": "string" } },
+          "answer": { "type": "integer" },
+          "explanation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

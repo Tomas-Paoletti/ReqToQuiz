@@ -1,0 +1,15 @@
+# Quizzes generados (historial local)
+data/
+
+# Dependencias y builds
+node_modules/
+backend/web/dist/*
+!backend/web/dist/.gitkeep
+reqtoquiz
+reqtoquiz.exe
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
