@@ -15,7 +15,7 @@ Es una app **local**: corre en tu máquina, usa tu sesión de Claude Code y no n
 - [Instalación y puesta en marcha](#instalación-y-puesta-en-marcha)
 - [Uso](#uso)
 - [Cómo funciona](#cómo-funciona)
-- [Respaldo con Codex](#respaldo-con-codex)
+- [Motores: elección, sesión y respaldo](#motores-elección-sesión-y-respaldo)
 - [Arquitectura](#arquitectura)
 - [Estructura del repo](#estructura-del-repo)
 - [La skill `job-quiz`](#la-skill-job-quiz)
@@ -41,7 +41,7 @@ Es una app **local**: corre en tu máquina, usa tu sesión de Claude Code y no n
    - **Imprimir respuestas** genera una versión para imprimir o guardar como PDF con tu respuesta, la correcta y la explicación;
    - **Reintentar** vuelve a empezar con las opciones mezcladas de nuevo.
 6. **Historial**: la pantalla de inicio lista todos los quizzes generados con su último puntaje. Desde ahí los abrís o los borrás.
-7. **Respaldo con Codex**: si Claude Code no está instalado, no tiene sesión iniciada, alcanzó su límite de uso o falla, el quiz se genera con Codex. La pantalla de inicio muestra qué motor se usa y el historial indica con cuál se generó cada quiz.
+7. **Elegir motor y respaldo con Codex**: si tenés Claude Code y Codex, elegís cuál usar o dejás **Automático** (Claude primero y, si no tiene sesión o falla, Codex). La app comprueba si cada uno tiene **sesión iniciada**, lo muestra en pantalla y, si falta, te dice el comando para iniciarla. El historial indica con qué motor se generó cada quiz.
 8. **Sin preguntas repetidas**: si subís un requerimiento que ya usaste (el mismo PDF, o el mismo texto aunque cambien las mayúsculas o los espacios), el quiz nuevo **no repite los conceptos** de los anteriores. En el historial aparece como "Variante 2", "Variante 3", etc.
 
 ---
@@ -164,9 +164,48 @@ Claude escribe solo los datos (`questions.json`) y el backend arma la página co
 
 Además, el backend **mezcla las opciones** de cada pregunta para que la respuesta correcta no quede siempre en la misma posición.
 
-## Respaldo con Codex
+## Motores: elección, sesión y respaldo
 
-El backend tiene una interfaz `Engine` con dos implementaciones (`backend/internal/runner/claude.go` y `codex.go`) y las prueba **en orden**:
+### Elegir el motor
+
+Si hay **más de un motor instalado**, el formulario muestra un selector **Motor**:
+
+| Opción | Qué hace |
+|---|---|
+| **Automático** (por defecto) | Usa Claude Code; si no tiene sesión o falla, pasa a Codex. |
+| **Claude Code** | Usa solo Claude Code. Si falla, muestra el error, **sin** pasar a Codex. |
+| **Codex** | Usa solo Codex, sin respaldo. |
+
+La elección se recuerda en el navegador. Las opciones sin sesión iniciada aparecen deshabilitadas.
+
+### Comprobación de sesión
+
+Debajo del formulario hay un panel **Motores** con el estado de cada uno:
+
+- 🟢 **Sesión iniciada**, con el detalle (por ejemplo `claude.ai · plan pro`).
+- 🔴 **Sin sesión iniciada**, con el comando para iniciarla (`claude auth login` / `codex login`).
+- 🟡 **No se pudo comprobar**: el comando de estado falló, así que se intenta igual.
+- ⚪ **No instalado**.
+
+El botón **Volver a comprobar** actualiza el estado, por ejemplo después de iniciar sesión en una terminal.
+
+Cómo se comprueba:
+
+| Motor | Comando | Sesión iniciada si… |
+|---|---|---|
+| Claude Code | `claude auth status` | devuelve JSON con `"loggedIn": true` |
+| Codex | `codex login status` | termina con código 0, o hay `OPENAI_API_KEY` / `CODEX_API_KEY` en el entorno |
+
+Se comprueba en estos momentos:
+
+1. **Al arrancar**: la consola muestra `sesión Claude Code: iniciada (…)` o `sesión Codex: NO iniciada, ejecutá codex login`.
+2. **Al cargar la página** (`/api/health`, con 20 s de caché).
+3. **Al crear el quiz**: si el motor elegido no tiene sesión, el pedido se rechaza al instante con el comando para iniciarla, y no se crea ningún quiz.
+4. **Justo antes de generar**, sin caché. En automático, los motores sin sesión se **omiten** ("Claude Code no tiene sesión iniciada… Se omite.") y se pasa al siguiente.
+
+### Respaldo con Codex
+
+El backend tiene una interfaz `Engine` con dos implementaciones (`backend/internal/runner/claude.go` y `codex.go`). En modo automático las prueba **en orden**:
 
 ```
 Claude Code ──falla──► Codex ──falla──► error con los motivos de los dos
@@ -176,7 +215,7 @@ Claude Code ──falla──► Codex ──falla──► error con los motivo
           quiz listo (meta.engine = "claude" | "codex")
 ```
 
-**Cuándo pasa a Codex**: cuando Claude Code no está en el PATH (directamente arranca con Codex) o cuando una generación con Claude falla por cualquier motivo: sesión no iniciada, límite de uso, modelo inválido, error de red, más de 10 minutos, o JSON inválido incluso después del reintento. La pantalla de progreso lo avisa: *"Claude Code no pudo generar el quiz (motivo). Probando con Codex…"*.
+**Cuándo pasa a Codex** (solo en modo automático): cuando Claude Code no está instalado o no tiene sesión (se omite sin ejecutarlo), o cuando una generación con Claude falla por cualquier motivo: límite de uso, modelo inválido, error de red, más de 10 minutos, o JSON inválido incluso después del reintento. La pantalla de progreso lo avisa: *"Claude Code no pudo generar el quiz: (motivo). Probando con Codex…"*.
 
 **Cómo genera Codex**: ejecuta
 
@@ -190,7 +229,6 @@ codex exec --json --sandbox read-only --skip-git-repo-check --ephemeral \
 - **PDF**: Codex no lee PDFs, así que el backend extrae el texto antes (`backend/internal/pdftext`) y le pasa `input-extracted.txt`. Si el PDF es un escaneo sin texto, Codex no puede usarlo y lo informa.
 - Después se valida igual que con Claude: formato, cantidad y repetidas, con un reintento si algo está mal.
 
-`GET /api/health` devuelve los motores disponibles en orden, y la pantalla de inicio lo muestra ("Genera con Claude Code; si falla, usa Codex de respaldo").
 
 ### Cómo evita repetir preguntas
 
@@ -318,9 +356,9 @@ También podés usar la skill sin la app, desde Claude Code en este repo:
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `GET` | `/api/health` | Motores disponibles en orden de uso: `{ "engines": [{ "id": "claude", "name": "Claude Code" }, …] }`. |
+| `GET` | `/api/health` | Estado de cada motor: `{ "engines": [{ "id": "claude", "name": "Claude Code", "installed": true, "auth": { "state": "logged_in", "detail": "claude.ai · plan pro", "loginCommand": "claude auth login" } }, { "id": "codex", "installed": false, … }] }`. `state` puede ser `logged_in`, `logged_out` o `unknown`. Con `?refresh=1` no usa la caché. |
 | `GET` | `/api/quizzes` | Historial, del más nuevo al más viejo. |
-| `POST` | `/api/quizzes` | Crea un quiz. Multipart: `file` **o** `text`, `count`, `language`, `difficulty`. Responde el `meta` con el `id`. |
+| `POST` | `/api/quizzes` | Crea un quiz. Multipart: `file` **o** `text`, `count`, `language`, `difficulty` y `engine` opcional (`auto`, `claude` o `codex`; por defecto `auto`). Responde el `meta` con el `id`. Devuelve **400** si el motor elegido no está instalado o no tiene sesión. |
 | `GET` | `/api/quizzes/{id}` | Datos de un quiz. |
 | `DELETE` | `/api/quizzes/{id}` | Borra un quiz (no se puede mientras se genera). |
 | `GET` | `/api/quizzes/{id}/events` | Progreso por Server-Sent Events: `progress`, `done` (con `url`) o `error`. |
@@ -389,7 +427,9 @@ Los cambios en la plantilla del quiz se aplican a los quizzes **nuevos**; los ya
 |---|---|
 | `no se encontró ningún motor` | Instalá Claude Code o Codex y abrí una terminal nueva. |
 | "Claude Code no pudo generar el quiz… Probando con Codex" | Claude falló (sesión, límite de uso, etc.). El motivo aparece en el mensaje; mientras tanto el quiz se genera con Codex. |
-| "Codex no tiene sesión iniciada" | Ejecutá `codex login`. |
+| "Codex no tiene sesión iniciada" / "Claude Code no tiene sesión iniciada" | Ejecutá `codex login` / `claude auth login` y tocá **Volver a comprobar** en el panel Motores. |
+| El selector de motor no aparece | Solo aparece si hay más de un motor instalado. Con uno solo se usa ese. |
+| Una opción del selector está tachada | Ese motor no tiene sesión iniciada. |
 | "Codex necesita el texto del PDF" | El PDF es un escaneo o una imagen sin texto. Usá Claude Code (lee PDFs escaneados) o pegá el texto. |
 | La generación falla enseguida con un error de autenticación | Ejecutá `claude` en una terminal e iniciá sesión (o `codex login`). |
 | `no se encontró la raíz del repo` | Ejecutá el binario desde la carpeta del repo o pasá `-root <ruta>`. |

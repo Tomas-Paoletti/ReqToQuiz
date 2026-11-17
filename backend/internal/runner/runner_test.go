@@ -16,15 +16,23 @@ import (
 
 // fakeEngine either fails or writes a quiz. calls counts Run invocations.
 type fakeEngine struct {
-	id    string
-	fail  error
-	quiz  func(req Request) *quiz.Quiz
-	calls int
-	fixes []string
+	id        string
+	fail      error
+	quiz      func(req Request) *quiz.Quiz
+	loggedOut bool
+	calls     int
+	fixes     []string
 }
 
 func (f *fakeEngine) ID() string   { return f.id }
 func (f *fakeEngine) Name() string { return "Fake " + f.id }
+
+func (f *fakeEngine) Auth(context.Context) AuthStatus {
+	if f.loggedOut {
+		return AuthStatus{State: AuthLoggedOut, LoginCommand: f.id + " login"}
+	}
+	return AuthStatus{State: AuthLoggedIn}
+}
 
 func (f *fakeEngine) Run(_ context.Context, req Request, _ string, progress Progress) (string, error) {
 	f.calls++
@@ -154,5 +162,89 @@ func TestAllEnginesFail(t *testing.T) {
 	got, _ := m.Store.Get(meta.ID)
 	if got.Status != store.StatusError {
 		t.Errorf("expected error status, got %s", got.Status)
+	}
+}
+
+func TestAutoSkipsEngineWithoutSession(t *testing.T) {
+	claude := &fakeEngine{id: "claude", loggedOut: true, quiz: goodQuiz("claude")}
+	codex := &fakeEngine{id: "codex", quiz: goodQuiz("codex")}
+	m, meta := newTestManager(t, claude, codex)
+
+	events := runSync(t, m, meta)
+	if claude.calls != 0 {
+		t.Errorf("an engine without session must not run, got %d calls", claude.calls)
+	}
+	skipped := false
+	for _, e := range events {
+		if strings.Contains(e.Message, "Fake claude no tiene sesión iniciada: ejecutá `claude login`") && strings.Contains(e.Message, "Se omite") {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Error("expected a progress message saying the engine was skipped")
+	}
+	if got, _ := m.Store.Get(meta.ID); got.Engine != "codex" || got.Status != store.StatusReady {
+		t.Errorf("expected codex to generate it, got %+v", got)
+	}
+}
+
+func TestChosenEngineIsUsedAlone(t *testing.T) {
+	claude := &fakeEngine{id: "claude", quiz: goodQuiz("claude")}
+	codex := &fakeEngine{id: "codex", quiz: goodQuiz("codex")}
+	m, meta := newTestManager(t, claude, codex)
+	meta.EngineChoice = "codex"
+
+	runSync(t, m, meta)
+	if claude.calls != 0 || codex.calls != 1 {
+		t.Fatalf("only codex should run: claude=%d codex=%d", claude.calls, codex.calls)
+	}
+	if got, _ := m.Store.Get(meta.ID); got.Engine != "codex" {
+		t.Errorf("expected engine codex, got %q", got.Engine)
+	}
+}
+
+func TestChosenEngineDoesNotFallBack(t *testing.T) {
+	claude := &fakeEngine{id: "claude", fail: errors.New("límite de uso alcanzado")}
+	codex := &fakeEngine{id: "codex", quiz: goodQuiz("codex")}
+	m, meta := newTestManager(t, claude, codex)
+	meta.EngineChoice = "claude"
+
+	events := runSync(t, m, meta)
+	if codex.calls != 0 {
+		t.Error("a chosen engine must not fall back to another one")
+	}
+	if last := events[len(events)-1]; last.Type != "error" || !strings.Contains(last.Message, "límite de uso") {
+		t.Errorf("expected the chosen engine's error, got %+v", last)
+	}
+}
+
+func TestCheckChoice(t *testing.T) {
+	ctx := context.Background()
+	in := &fakeEngine{id: "claude"}
+	out := &fakeEngine{id: "codex", loggedOut: true}
+	m, _ := newTestManager(t, in, out)
+
+	if err := m.CheckChoice(ctx, "auto"); err != nil {
+		t.Errorf("auto with one logged-in engine should pass: %v", err)
+	}
+	if err := m.CheckChoice(ctx, "claude"); err != nil {
+		t.Errorf("logged-in engine should pass: %v", err)
+	}
+	if err := m.CheckChoice(ctx, "codex"); err == nil || !strings.Contains(err.Error(), "`codex login`") {
+		t.Errorf("logged-out engine should fail with the login command, got %v", err)
+	}
+	if err := m.CheckChoice(ctx, "gemini"); err == nil {
+		t.Error("unknown engine should fail")
+	}
+
+	only, _ := newTestManager(t, &fakeEngine{id: "claude", loggedOut: true})
+	if err := only.CheckChoice(ctx, "auto"); err == nil {
+		t.Error("auto with no logged-in engine should fail")
+	}
+	if err := only.CheckChoice(ctx, "codex"); err == nil || !strings.Contains(err.Error(), "no está instalado") {
+		t.Errorf("missing engine should fail as not installed, got %v", err)
+	}
+	if len(only.Missing) != 1 || only.Missing[0] != "codex" {
+		t.Errorf("expected codex reported as missing, got %v", only.Missing)
 	}
 }

@@ -3,10 +3,24 @@ export type Language = "es" | "en";
 export type Status = "generating" | "ready" | "error";
 export type EngineId = "claude" | "codex";
 
-export interface Health {
-  /** Available engines, in fallback order. */
-  engines: { id: EngineId; name: string }[];
+export type EngineChoice = "auto" | EngineId;
+export type AuthState = "logged_in" | "logged_out" | "unknown";
+
+export interface EngineStatus {
+  id: EngineId;
+  name: string;
+  installed: boolean;
+  /** Present only when installed. */
+  auth?: { state: AuthState; detail?: string; loginCommand?: string };
 }
+
+export interface Health {
+  /** Installed engines first (in fallback order), then the missing ones. */
+  engines: EngineStatus[];
+}
+
+/** An engine can be used unless it is missing or known to be logged out. */
+export const usable = (e: EngineStatus) => e.installed && e.auth?.state !== "logged_out";
 
 export const engineLabel: Record<EngineId, string> = { claude: "Claude Code", codex: "Codex" };
 
@@ -51,6 +65,7 @@ export interface CreateQuizInput {
   count: number;
   language: Language;
   difficulty: Difficulty;
+  engine: EngineChoice;
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -62,7 +77,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return res.status === 204 ? (undefined as T) : res.json();
 }
 
-export const getHealth = () => request<Health>("/api/health");
+export const getHealth = (refresh = false) => request<Health>(`/api/health${refresh ? "?refresh=1" : ""}`);
 
 export const listQuizzes = () => request<QuizMeta[]>("/api/quizzes");
 
@@ -77,6 +92,7 @@ export function createQuiz(input: CreateQuizInput) {
   form.append("count", String(input.count));
   form.append("language", input.language);
   form.append("difficulty", input.difficulty);
+  form.append("engine", input.engine);
   return request<QuizMeta>("/api/quizzes", { method: "POST", body: form });
 }
 

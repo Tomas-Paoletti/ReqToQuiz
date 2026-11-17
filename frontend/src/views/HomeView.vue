@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   createQuiz,
@@ -9,9 +9,12 @@ import {
   getHealth,
   languageLabel,
   listQuizzes,
-  type Health,
   quizUrl,
+  usable,
   type Difficulty,
+  type EngineChoice,
+  type EngineStatus,
+  type Health,
   type Language,
   type QuizMeta,
 } from "../api";
@@ -31,21 +34,98 @@ const formError = ref("");
 const history = ref<QuizMeta[]>([]);
 const historyError = ref("");
 const health = ref<Health | null>(null);
+const checking = ref(false);
 
-const engineNote = computed(() => {
-  const e = health.value?.engines ?? [];
-  if (e.length === 0) return null;
-  if (e.length > 1) return { warn: false, text: `Genera con ${e[0].name}; si falla, usa ${e[1].name} de respaldo.` };
-  if (e[0].id === "codex")
-    return { warn: true, text: "Claude Code no está disponible: los quizzes se generan con Codex." };
-  return { warn: false, text: `Genera con ${e[0].name} (sin respaldo: Codex no está instalado).` };
+// --- Engine choice and session status -------------------------------------
+const ENGINE_KEY = "reqtoquiz.engine";
+const storedChoice = (): EngineChoice => {
+  try {
+    const v = localStorage.getItem(ENGINE_KEY);
+    if (v === "auto" || v === "claude" || v === "codex") return v;
+  } catch {
+    /* storage unavailable */
+  }
+  return "auto";
+};
+const engineChoice = ref<EngineChoice>(storedChoice());
+watch(engineChoice, (v) => {
+  try {
+    localStorage.setItem(ENGINE_KEY, v);
+  } catch {
+    /* storage unavailable */
+  }
 });
+
+const engines = computed(() => health.value?.engines ?? []);
+const installed = computed(() => engines.value.filter((e) => e.installed));
+const usableEngines = computed(() => installed.value.filter(usable));
+/** The selector only makes sense when there is something to choose. */
+const showSelector = computed(() => installed.value.length > 1);
+
+const choices = computed(() => [
+  { value: "auto" as EngineChoice, label: "Automático", disabled: usableEngines.value.length === 0 },
+  ...installed.value.map((e) => ({ value: e.id as EngineChoice, label: e.name, disabled: !usable(e) })),
+]);
+
+// If the stored/selected choice is no longer usable, fall back to automatic.
+watch(choices, (list) => {
+  const current = list.find((c) => c.value === engineChoice.value);
+  if (!current || current.disabled) engineChoice.value = "auto";
+});
+
+const choiceHint = computed(() => {
+  const u = usableEngines.value;
+  if (engineChoice.value !== "auto") return "Se usa solo este motor, sin respaldo.";
+  if (u.length > 1) return `Usa ${u[0].name}; si falla, ${u.slice(1).map((e) => e.name).join(", ")}.`;
+  if (u.length === 1) return `Usa ${u[0].name} (sin respaldo).`;
+  return "";
+});
+
+/** Blocking problem with the engines, if any. */
+const engineBlocker = computed(() => {
+  if (!health.value) return "";
+  if (installed.value.length === 0) return "No hay ningún motor instalado: instalá Claude Code o Codex.";
+  if (usableEngines.value.length === 0)
+    return "Ningún motor tiene sesión iniciada. Iniciá sesión y tocá «Volver a comprobar».";
+  return "";
+});
+
+function statusText(e: EngineStatus) {
+  if (!e.installed) return "No instalado";
+  switch (e.auth?.state) {
+    case "logged_in":
+      return e.auth.detail ? `Sesión iniciada · ${e.auth.detail}` : "Sesión iniciada";
+    case "logged_out":
+      return "Sin sesión iniciada";
+    default:
+      return "No se pudo comprobar la sesión (se intenta igual)";
+  }
+}
+
+function statusClass(e: EngineStatus) {
+  if (!e.installed) return "off";
+  return e.auth?.state === "logged_in" ? "ok" : e.auth?.state === "logged_out" ? "bad" : "warn";
+}
+
+async function loadHealth(refresh = false) {
+  checking.value = true;
+  try {
+    health.value = await getHealth(refresh);
+  } catch {
+    /* backend down: the form will show the error on submit */
+  } finally {
+    checking.value = false;
+  }
+}
 
 const counts = [5, 10, 20, 30, 40];
 const accepted = [".pdf", ".md", ".markdown", ".txt"];
 
 const canSubmit = computed(
-  () => !submitting.value && (mode.value === "file" ? !!file.value : text.value.trim().length >= 40),
+  () =>
+    !submitting.value &&
+    !engineBlocker.value &&
+    (mode.value === "file" ? !!file.value : text.value.trim().length >= 40),
 );
 
 function pickFile(f: File | undefined | null) {
@@ -84,11 +164,14 @@ async function submit() {
       count: count.value,
       language: language.value,
       difficulty: difficulty.value,
+      engine: showSelector.value ? engineChoice.value : "auto",
     });
     router.push(`/generating/${quiz.id}`);
   } catch (e) {
     formError.value = (e as Error).message;
     submitting.value = false;
+    loadHealth(true); // the error may be a session that just expired
+
   }
 }
 
@@ -123,9 +206,7 @@ const scoreClass = (s: number) => (s >= 80 ? "good" : s >= 60 ? "mid" : "low");
 
 onMounted(() => {
   loadHistory();
-  getHealth()
-    .then((h) => (health.value = h))
-    .catch(() => {});
+  loadHealth();
 });
 </script>
 
@@ -197,9 +278,41 @@ onMounted(() => {
           </button>
         </div>
       </div>
+      <div v-if="showSelector" class="field">
+        <span class="label">Motor</span>
+        <div class="segmented">
+          <button
+            v-for="c in choices"
+            :key="c.value"
+            :class="{ active: engineChoice === c.value }"
+            :disabled="c.disabled"
+            :title="c.disabled ? 'Sin sesión iniciada' : ''"
+            @click="engineChoice = c.value"
+          >
+            {{ c.label }}
+          </button>
+        </div>
+        <span v-if="choiceHint" class="muted hint-inline">{{ choiceHint }}</span>
+      </div>
     </div>
 
-    <p v-if="engineNote" class="engine-note" :class="{ warn: engineNote.warn }">{{ engineNote.text }}</p>
+    <div v-if="health" class="engines">
+      <div class="engines-head">
+        <span class="label">Motores</span>
+        <button class="small" :disabled="checking" @click="loadHealth(true)">
+          {{ checking ? "Comprobando…" : "Volver a comprobar" }}
+        </button>
+      </div>
+      <ul>
+        <li v-for="e in engines" :key="e.id">
+          <span class="dot" :class="statusClass(e)"></span>
+          <strong>{{ e.name }}</strong>
+          <span class="muted">{{ statusText(e) }}</span>
+          <code v-if="e.auth?.state === 'logged_out' && e.auth.loginCommand">{{ e.auth.loginCommand }}</code>
+        </li>
+      </ul>
+      <p v-if="engineBlocker" class="error-box">{{ engineBlocker }}</p>
+    </div>
 
     <button class="primary generate" :disabled="!canSubmit" @click="submit">
       {{ submitting ? "Enviando…" : "Generar quiz" }}
@@ -295,8 +408,19 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .segmented button.active { background: var(--accent); color: #fff; }
 
 .generate { width: 100%; padding: 12px; font-size: 1.05rem; }
-.engine-note { font-size: 0.82rem; color: var(--muted); margin: 0 0 10px; }
-.engine-note.warn { color: var(--bad); }
+.segmented button:disabled { background: none; text-decoration: line-through; }
+.hint-inline { font-size: 0.82rem; }
+
+.engines { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 0 0 16px; }
+.engines-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.engines ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.engines li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.88rem; }
+.engines code { font-size: 0.8rem; background: var(--bad-soft); color: var(--bad); padding: 1px 6px; border-radius: 4px; }
+.engines .error-box { margin-top: 10px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--border); }
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--bad); }
+.dot.warn { background: #ca8a04; }
 .hint { font-size: 0.85rem; margin: 8px 0 0; }
 
 .history { list-style: none; margin: 0; padding: 0; }

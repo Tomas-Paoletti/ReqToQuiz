@@ -93,24 +93,103 @@ func (j *Job) Subscribe() ([]Event, <-chan Event, func()) {
 	}
 }
 
+// Known engines, in default fallback order.
+var (
+	KnownEngines = []string{"claude", "codex"}
+	EngineNames  = map[string]string{"claude": "Claude Code", "codex": "Codex"}
+)
+
+// ChoiceAuto tries every installed engine with a session, in order.
+const ChoiceAuto = "auto"
+
 type Manager struct {
 	Root    string   // repo root: cwd of the engines, holds .claude/skills/job-quiz
-	Engines []Engine // tried in order until one succeeds
+	Engines []Engine // installed engines, in fallback order
+	Missing []string // ids of known engines that are not installed
 	Timeout time.Duration
 	Store   *store.Store
 
+	auth authCache
 	sem  chan struct{} // one generation at a time
 	mu   sync.Mutex
 	jobs map[string]*Job
 }
 
 func NewManager(root string, engines []Engine, st *store.Store) *Manager {
-	return &Manager{
+	m := &Manager{
 		Root: root, Engines: engines, Store: st,
 		Timeout: 10 * time.Minute,
+		auth:    authCache{ttl: 20 * time.Second},
 		sem:     make(chan struct{}, 1),
 		jobs:    map[string]*Job{},
 	}
+	for _, id := range KnownEngines {
+		if m.engine(id) == nil {
+			m.Missing = append(m.Missing, id)
+		}
+	}
+	return m
+}
+
+func (m *Manager) engine(id string) Engine {
+	for _, e := range m.Engines {
+		if e.ID() == id {
+			return e
+		}
+	}
+	return nil
+}
+
+// AuthStatuses returns the session state of each installed engine.
+// force skips the short cache.
+func (m *Manager) AuthStatuses(ctx context.Context, force bool) map[string]AuthStatus {
+	return m.auth.statuses(ctx, m.Engines, force)
+}
+
+// plan returns the engines to try for a choice ("auto" or an engine id).
+func (m *Manager) plan(choice string) ([]Engine, error) {
+	if choice == "" || choice == ChoiceAuto {
+		if len(m.Engines) == 0 {
+			return nil, errors.New("no hay ningún motor instalado: instalá Claude Code o Codex")
+		}
+		return m.Engines, nil
+	}
+	name, known := EngineNames[choice]
+	if !known {
+		return nil, fmt.Errorf("motor inválido %q", choice)
+	}
+	e := m.engine(choice)
+	if e == nil {
+		return nil, fmt.Errorf("%s no está instalado", name)
+	}
+	return []Engine{e}, nil
+}
+
+// notLoggedIn builds the error for an engine without a session.
+func notLoggedIn(e Engine, st AuthStatus) error {
+	return fmt.Errorf("%s no tiene sesión iniciada: ejecutá `%s` en una terminal", e.Name(), st.LoginCommand)
+}
+
+// CheckChoice validates a choice before a quiz is created, so the user gets
+// the error right away instead of after the generation starts.
+func (m *Manager) CheckChoice(ctx context.Context, choice string) error {
+	engines, err := m.plan(choice)
+	if err != nil {
+		return err
+	}
+	statuses := m.AuthStatuses(ctx, false)
+	var errs []string
+	for _, e := range engines {
+		st := statuses[e.ID()]
+		if st.Usable() {
+			return nil
+		}
+		errs = append(errs, notLoggedIn(e, st).Error())
+	}
+	if len(errs) == 1 {
+		return errors.New(errs[0])
+	}
+	return errors.New("ningún motor tiene sesión iniciada. " + strings.Join(errs, " — "))
 }
 
 func (m *Manager) Get(id string) *Job {
@@ -151,9 +230,11 @@ func (m *Manager) run(meta *store.Meta, job *Job) {
 }
 
 func (m *Manager) generate(meta *store.Meta, job *Job) error {
-	if len(m.Engines) == 0 {
-		return errors.New("no hay ningún motor disponible: instalá Claude Code o Codex")
+	engines, err := m.plan(meta.EngineChoice)
+	if err != nil {
+		return err
 	}
+	auto := meta.EngineChoice == "" || meta.EngineChoice == ChoiceAuto
 	job.emit(Event{Type: "progress", Step: StepStart, Message: "Preparando la generación…"})
 
 	req := Request{
@@ -184,12 +265,24 @@ func (m *Manager) generate(meta *store.Meta, job *Job) error {
 			"Ya generaste %s con este requerimiento: las %d preguntas anteriores no se van a repetir.", prev, len(previous))})
 	}
 
-	// Try each engine in order; fall back to the next one on any failure.
+	// Fresh session check: the user may have logged in/out since the page loaded.
+	statuses := m.AuthStatuses(context.Background(), true)
+
+	// Try each engine in order; in auto mode fall back to the next one on any failure.
 	var failures []string
-	for i, engine := range m.Engines {
-		if i > 0 {
+	for _, engine := range engines {
+		if st := statuses[engine.ID()]; !st.Usable() {
+			err := notLoggedIn(engine, st)
+			if !auto {
+				return err
+			}
+			job.emit(Event{Type: "progress", Step: StepStart, Engine: engine.ID(), Message: err.Error() + ". Se omite."})
+			failures = append(failures, engine.Name()+": "+err.Error())
+			continue
+		}
+		if len(failures) > 0 {
 			job.emit(Event{Type: "progress", Step: StepStart, Engine: engine.ID(), Message: fmt.Sprintf(
-				"%s no pudo generar el quiz (%s). Probando con %s…", m.Engines[i-1].Name(), short(failures[i-1]), engine.Name())})
+				"%s. Probando con %s…", short(failures[len(failures)-1]), engine.Name())})
 		} else {
 			job.emit(Event{Type: "progress", Step: StepStart, Engine: engine.ID(), Message: "Iniciando " + engine.Name() + "…"})
 		}
@@ -198,16 +291,12 @@ func (m *Manager) generate(meta *store.Meta, job *Job) error {
 			return m.finish(meta, q, engine)
 		}
 		log.Printf("quiz %s: %s falló: %v", meta.ID, engine.Name(), err)
-		failures = append(failures, err.Error())
+		failures = append(failures, engine.Name()+" no pudo generar el quiz: "+err.Error())
 	}
 	if len(failures) == 1 {
 		return errors.New(failures[0])
 	}
-	parts := make([]string, len(failures))
-	for i, f := range failures {
-		parts[i] = m.Engines[i].Name() + ": " + f
-	}
-	return errors.New("ningún motor pudo generar el quiz. " + strings.Join(parts, " — "))
+	return errors.New("ningún motor pudo generar el quiz. " + strings.Join(failures, " — "))
 }
 
 // attempt runs one engine: a first try and, if the result is invalid, one

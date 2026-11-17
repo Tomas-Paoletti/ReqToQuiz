@@ -61,15 +61,23 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// health reports which engines are available, in fallback order.
+// health reports every known engine: installed or not and, if installed,
+// whether it has a session. ?refresh=1 skips the short auth cache.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	type engine struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID        string             `json:"id"`
+		Name      string             `json:"name"`
+		Installed bool               `json:"installed"`
+		Auth      *runner.AuthStatus `json:"auth,omitempty"`
 	}
+	statuses := s.Runner.AuthStatuses(r.Context(), r.URL.Query().Get("refresh") == "1")
 	out := []engine{}
-	for _, e := range s.Runner.Engines {
-		out = append(out, engine{e.ID(), e.Name()})
+	for _, e := range s.Runner.Engines { // installed, in fallback order
+		st := statuses[e.ID()]
+		out = append(out, engine{ID: e.ID(), Name: e.Name(), Installed: true, Auth: &st})
+	}
+	for _, id := range s.Runner.Missing {
+		out = append(out, engine{ID: id, Name: runner.EngineNames[id]})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"engines": out})
 }
@@ -115,6 +123,15 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "dificultad inválida")
 		return
 	}
+	engineChoice := r.FormValue("engine")
+	if engineChoice == "" {
+		engineChoice = runner.ChoiceAuto
+	}
+	// Fail fast: chosen engine not installed or without a session.
+	if err := s.Runner.CheckChoice(r.Context(), engineChoice); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var (
 		input     []byte
@@ -153,7 +170,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 
 	m := &store.Meta{
 		ID: store.NewID(), Count: count, Language: lang, Difficulty: diff,
-		Source: source, Status: store.StatusGenerating, CreatedAt: time.Now(),
+		Source: source, Status: store.StatusGenerating, CreatedAt: time.Now(), EngineChoice: engineChoice,
 		Title: strings.TrimSuffix(source, filepath.Ext(source)),
 	}
 	if err := s.Store.Create(m, inputName, input); err != nil {

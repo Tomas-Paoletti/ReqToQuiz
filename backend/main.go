@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -47,7 +48,9 @@ func main() {
 	}
 	markInterrupted(st)
 
-	srv := &api.Server{Store: st, Runner: runner.NewManager(repo, engines, st), Web: web.FS()}
+	mgr := runner.NewManager(repo, engines, st)
+	logSessions(mgr)
+	srv := &api.Server{Store: st, Runner: mgr, Web: web.FS()}
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -102,6 +105,28 @@ func detectEngines(mode, claudeBin, claudeModel, codexBin, codexModel string) ([
 		log.Printf("sin motor de respaldo: solo se usará %s", engines[0].Name())
 	}
 	return engines, nil
+}
+
+// logSessions prints whether each installed engine has a session.
+func logSessions(m *runner.Manager) {
+	statuses := m.AuthStatuses(context.Background(), true)
+	usable := 0
+	for _, e := range m.Engines {
+		st := statuses[e.ID()]
+		switch st.State {
+		case runner.AuthLoggedIn:
+			usable++
+			log.Printf("sesión %s: iniciada (%s)", e.Name(), st.Detail)
+		case runner.AuthLoggedOut:
+			log.Printf("sesión %s: NO iniciada, ejecutá `%s`", e.Name(), st.LoginCommand)
+		default:
+			usable++
+			log.Printf("sesión %s: no se pudo comprobar (%s); se va a intentar igual", e.Name(), st.Detail)
+		}
+	}
+	if usable == 0 {
+		log.Printf("ATENCIÓN: ningún motor tiene sesión iniciada; no se van a poder generar quizzes hasta que inicies sesión")
+	}
 }
 
 // findRoot locates the repo root by looking for the job-quiz skill, starting

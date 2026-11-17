@@ -47,7 +47,8 @@ type Meta struct {
 	// PreviousQuizzes is how many earlier quizzes used the same requirement;
 	// their questions were excluded from this one.
 	PreviousQuizzes int       `json:"previousQuizzes"`
-	Engine          string    `json:"engine,omitempty"` // "claude" | "codex": which one generated it
+	Engine          string    `json:"engine,omitempty"`       // "claude" | "codex": which one generated it
+	EngineChoice    string    `json:"engineChoice,omitempty"` // what the user picked: "auto" | "claude" | "codex"
 	Status          string    `json:"status"`
 	Error           string    `json:"error,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
