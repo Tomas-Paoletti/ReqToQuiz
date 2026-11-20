@@ -8,6 +8,7 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "jspdf": "4.2.1",
     "vue": "^3.5.45",
     "vue-router": "^4.6.5"
   },

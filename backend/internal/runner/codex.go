@@ -45,47 +45,48 @@ type codexLine struct {
 }
 
 func (c *Codex) Run(ctx context.Context, req Request, _ string, progress Progress) (string, error) {
-	progress(StepSkill, "Codex: preparando la skill job-quiz…")
+	progress(StepSkill, "Codex: preparando la skill "+req.Skill+"…")
 
-	input := req.InputPath
-	if strings.EqualFold(filepath.Ext(input), ".pdf") {
-		// Codex cannot read PDFs: hand it the extracted text instead.
-		txt := filepath.Join(req.QuizDir, "input-extracted.txt")
+	// Codex cannot read PDFs: hand it the extracted text instead.
+	paths := map[string]string{}
+	for _, in := range req.Inputs {
+		paths[in.Key] = in.Path
+		if !strings.EqualFold(filepath.Ext(in.Path), ".pdf") {
+			continue
+		}
+		txt := filepath.Join(req.QuizDir, in.Key+"-extracted.txt")
 		if _, err := os.Stat(txt); err != nil {
-			text, err := pdftext.Extract(input)
+			text, err := pdftext.Extract(in.Path)
 			if err != nil {
-				return "", fmt.Errorf("Codex necesita el texto del PDF: %w", err)
+				return "", fmt.Errorf("Codex necesita el texto del PDF (%s): %w", in.Label, err)
 			}
 			if err := os.WriteFile(txt, []byte(text), 0o644); err != nil {
 				return "", err
 			}
 		}
-		input = txt
+		paths[in.Key] = txt
+	}
+	schemaJSON := req.CodexSchema
+	if len(schemaJSON) == 0 {
+		schemaJSON = codexSchema
 	}
 	schema := filepath.Join(req.QuizDir, "codex-schema.json")
-	if err := os.WriteFile(schema, codexSchema, 0o644); err != nil {
+	if err := os.WriteFile(schema, schemaJSON, 0o644); err != nil {
 		return "", err
 	}
 	_ = os.Remove(req.OutputPath)
 
-	avoid := ""
-	if req.AvoidPath != "" {
-		avoid = "avoid: " + req.Rel(req.AvoidPath) + "\n"
-	}
-	prompt := fmt.Sprintf(`You are following the "job-quiz" skill of this repository.
-First read .claude/skills/job-quiz/SKILL.md and .claude/skills/job-quiz/schema.md and follow them exactly.
+	prompt := fmt.Sprintf(`You are following the "%[1]s" skill of this repository.
+First read .claude/skills/%[1]s/SKILL.md and .claude/skills/%[1]s/schema.md and follow them exactly.
 
-input: %s
-count: %d
-language: %s
-difficulty: %s
-%s
+%[2]s
 Differences from the skill instructions:
-- Do NOT write or modify any file. Return the quiz JSON as your final answer; it is validated against the provided output schema and saved for you.
+- Do NOT write or modify any file. Return the JSON as your final answer; it is validated against the provided output schema and saved for you.
+- PDF inputs were converted to plain text for you; read those text files instead.
 - There is no human in the loop: do not ask questions.
-`, req.Rel(input), req.Count, req.Language, req.Difficulty, avoid)
+`, req.Skill, req.paramLines(func(in Input) string { return paths[in.Key] }))
 	if req.Fix != "" {
-		prompt += "\nA previous attempt was rejected for these problems, make sure the new quiz does not have them: " + req.Fix + "\n"
+		prompt += "\nA previous attempt was rejected for these problems, make sure the new answer does not have them: " + req.Fix + "\n"
 	}
 
 	args := []string{
@@ -132,16 +133,20 @@ Differences from the skill instructions:
 		case "item.started", "item.completed":
 			switch ev.Item.Type {
 			case "command_execution":
-				cmdline := filepath.ToSlash(ev.Item.Command)
-				if strings.Contains(cmdline, "input") && step != StepGenerate {
-					setStep(StepRead, "Codex: leyendo el requerimiento del puesto…")
+				if step != StepGenerate {
+					for _, in := range req.Inputs {
+						if strings.Contains(ev.Item.Command, strings.TrimSuffix(filepath.Base(paths[in.Key]), filepath.Ext(paths[in.Key]))) {
+							step = ""
+							setStep(StepRead, "Codex: leyendo "+in.Label+"…")
+						}
+					}
 				}
 			case "reasoning":
 				if step == StepRead {
-					setStep(StepGenerate, "Codex: pensando las preguntas…")
+					setStep(StepGenerate, "Codex: "+lowerFirst(req.Labels.Think))
 				}
 			case "agent_message":
-				setStep(StepWrite, "Codex: devolviendo el quiz…")
+				setStep(StepWrite, "Codex: devolviendo "+req.Labels.Noun+"…")
 			case "error":
 				lastError = ev.Item.Message
 			}
@@ -174,7 +179,15 @@ Differences from the skill instructions:
 	}
 	if fi, err := os.Stat(req.OutputPath); err != nil || fi.Size() == 0 {
 		_ = os.Remove(req.OutputPath)
-		return thread, errors.New("Codex terminó sin devolver el quiz")
+		return thread, errors.New("Codex terminó sin devolver " + req.Labels.Noun)
 	}
 	return thread, nil
+}
+
+func lowerFirst(s string) string {
+	r := []rune(s)
+	if len(r) > 0 {
+		r[0] = []rune(strings.ToLower(string(r[0])))[0]
+	}
+	return string(r)
 }

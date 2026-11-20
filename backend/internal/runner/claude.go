@@ -6,12 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
-// Claude runs Claude Code headless (`claude -p`). It uses the job-quiz skill
-// directly, reads PDFs natively and writes questions.json itself.
+// Claude runs Claude Code headless (`claude -p`). It uses the repo skills
+// directly, reads PDFs natively and writes the output file itself.
 type Claude struct {
 	Path  string
 	Model string
@@ -22,26 +21,15 @@ func (c *Claude) Name() string { return "Claude Code" }
 
 func (c *Claude) prompt(req Request, session string) string {
 	if session != "" && req.Fix != "" {
-		p := fmt.Sprintf("The file %s is invalid: %s\nFix every problem and rewrite the whole file so it matches schema.md exactly, with exactly %d questions.",
-			req.Rel(req.OutputPath), req.Fix, req.Count)
-		if req.AvoidPath != "" {
-			p += "\nRepeated questions must be replaced by questions about different concepts that are NOT in " + req.Rel(req.AvoidPath) + " (not even rephrased)."
+		p := fmt.Sprintf("The file %s is invalid: %s\nFix every problem and rewrite the whole file so it matches schema.md of the %s skill exactly.",
+			req.Rel(req.OutputPath), req.Fix, req.Skill)
+		if req.FixHint != "" {
+			p += "\n" + req.FixHint
 		}
 		return p
 	}
-	avoid := ""
-	if req.AvoidPath != "" {
-		avoid = "avoid: " + req.Rel(req.AvoidPath) + "\n"
-	}
-	p := fmt.Sprintf(`Use the job-quiz skill to create the quiz.
-input: %s
-count: %d
-language: %s
-difficulty: %s
-output: %s
-%s
-There is no human in the loop: do not ask questions, just write the output file.`,
-		req.Rel(req.InputPath), req.Count, req.Language, req.Difficulty, req.Rel(req.OutputPath), avoid)
+	p := fmt.Sprintf("Use the %s skill.\n%soutput: %s\n\nThere is no human in the loop: do not ask questions, just write the output file.",
+		req.Skill, req.paramLines(func(in Input) string { return in.Path }), req.Rel(req.OutputPath))
 	if req.Fix != "" { // retry without a session to resume
 		p += "\nA previous attempt was rejected for these problems, avoid them: " + req.Fix
 	}
@@ -125,16 +113,16 @@ func (c *Claude) Run(ctx context.Context, req Request, session string, progress 
 			switch ev.Event.Type {
 			case "content_block_start":
 				if ev.Event.ContentBlock.Type == "thinking" && (step == StepRead || step == StepSkill) {
-					setStep(StepGenerate, "Analizando el puesto y pensando las preguntas…")
+					setStep(StepGenerate, req.Labels.Think)
 				}
 				inWrite = ev.Event.ContentBlock.Type == "tool_use" && ev.Event.ContentBlock.Name == "Write"
 				if inWrite {
 					partial.Reset()
 					lastCount = -1
-					setStep(StepGenerate, "Escribiendo las preguntas…")
+					setStep(StepGenerate, req.Labels.Write)
 				}
 			case "content_block_delta":
-				if inWrite && ev.Event.Delta.Type == "input_json_delta" {
+				if inWrite && req.Count > 0 && ev.Event.Delta.Type == "input_json_delta" {
 					partial.WriteString(ev.Event.Delta.PartialJSON)
 					// Inside the Write input the file content is an escaped JSON string.
 					n := strings.Count(partial.String(), `\"question\"`)
@@ -153,17 +141,18 @@ func (c *Claude) Run(ctx context.Context, req Request, session string, progress 
 				}
 				switch b.Name {
 				case "Skill":
-					setStep(StepSkill, "Cargando la skill job-quiz…")
+					setStep(StepSkill, "Cargando la skill "+req.Skill+"…")
 				case "Read":
 					var in struct {
 						FilePath string `json:"file_path"`
 					}
 					_ = json.Unmarshal(b.Input, &in)
-					if strings.Contains(filepath.ToSlash(in.FilePath), "/input.") {
-						setStep(StepRead, "Leyendo el requerimiento del puesto…")
+					if label := req.inputLabel(in.FilePath); label != "" {
+						step = "" // each input gets its own message
+						setStep(StepRead, "Leyendo "+label+"…")
 					}
 				case "Write":
-					setStep(StepWrite, "Guardando el quiz…")
+					setStep(StepWrite, req.Labels.Save)
 				}
 			}
 		case "result":

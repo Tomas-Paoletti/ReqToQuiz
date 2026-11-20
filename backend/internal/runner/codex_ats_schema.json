@@ -1,0 +1,223 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "role",
+    "company",
+    "language",
+    "summary",
+    "categories",
+    "knockouts",
+    "keywords",
+    "issues",
+    "strengths",
+    "rewrites",
+    "cvMarkdown"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "company": {
+      "type": "string"
+    },
+    "language": {
+      "type": "string",
+      "enum": [
+        "es",
+        "en"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "categories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "score",
+          "comment"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "keywords",
+              "experience",
+              "education",
+              "format"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer"
+          },
+          "comment": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "knockouts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requirement",
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "requirement": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "met",
+              "unclear",
+              "not_met"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "keywords": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "keyword",
+          "importance",
+          "status",
+          "evidence",
+          "suggestion"
+        ],
+        "properties": {
+          "keyword": {
+            "type": "string"
+          },
+          "importance": {
+            "type": "string",
+            "enum": [
+              "required",
+              "preferred"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "found",
+              "partial",
+              "missing"
+            ]
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "area",
+          "problem",
+          "fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "area": {
+            "type": "string",
+            "enum": [
+              "format",
+              "keywords",
+              "experience",
+              "education",
+              "content"
+            ]
+          },
+          "problem": {
+            "type": "string"
+          },
+          "fix": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "strengths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rewrites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "section",
+          "before",
+          "after",
+          "why"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "rephrase",
+              "add_keyword"
+            ]
+          },
+          "section": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "after": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cvMarkdown": {
+      "type": "string"
+    }
+  }
+}

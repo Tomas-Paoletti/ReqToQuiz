@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="{{.Lang}}">
+{{- $l := .Lang}}{{$r := .R}}
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{t $l "heading"}} · {{$r.Role}}</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #18202b; --muted: #5d6877; --border: #dfe3e8;
+    --accent: #4f46e5; --accent-soft: #eef0ff; --ok: #15803d; --ok-soft: #e9f7ee; --bad: #c2410c; --bad-soft: #fdf0e9;
+    --warn: #a16207; --warn-soft: #fdf6e3; --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11151b; --surface: #1a2029; --text: #e7ebf0; --muted: #9aa5b3; --border: #2c3542;
+      --accent: #8b85ff; --accent-soft: #24264a; --ok: #4ade80; --ok-soft: #14301f; --bad: #fb923c; --bad-soft: #3a2316;
+      --warn: #facc15; --warn-soft: #332b10;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 16px 80px; }
+  a { color: var(--accent); }
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .back { font-size: .9rem; text-decoration: none; }
+  header h1 { font-size: 1.6rem; margin: 8px 0 4px; line-height: 1.25; }
+  .sub { color: var(--muted); margin: 0; font-size: .92rem; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-weight: 600; padding: 8px 16px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; margin: 16px 0; break-inside: avoid-page; }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  .hero { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: center; }
+  .gauge { --p: 0; width: 132px; height: 132px; border-radius: 50%; display: grid; place-items: center;
+    background: conic-gradient(var(--c) calc(var(--p) * 1%), var(--border) 0); }
+  .gauge > div { width: 104px; height: 104px; border-radius: 50%; background: var(--surface); display: grid; place-items: center; text-align: center; }
+  .gauge strong { font-size: 2.2rem; line-height: 1; color: var(--c); }
+  .gauge small { color: var(--muted); font-size: .72rem; }
+  .good { --c: var(--ok); } .mid { --c: var(--warn); } .low { --c: var(--bad); }
+  .verdict { font-size: 1.25rem; font-weight: 800; color: var(--c); margin: 0 0 4px; }
+  .summary { margin: 8px 0 0; }
+  .alert { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--bad-soft); color: var(--bad); border: 1px solid var(--bad); font-weight: 600; font-size: .92rem; }
+  .cat { margin: 12px 0; }
+  .cat-head { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+  .cat-head span { color: var(--muted); font-weight: 400; font-size: .85rem; }
+  .bar { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; margin: 6px 0 4px; }
+  .bar > div { height: 100%; background: var(--c); }
+  .cat p { margin: 0; color: var(--muted); font-size: .92rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: 8px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .8rem; border-top: none; }
+  .pill { display: inline-block; font-size: .75rem; font-weight: 700; padding: 1px 9px; border-radius: 999px; white-space: nowrap; }
+  .s-found, .s-met { background: var(--ok-soft); color: var(--ok); }
+  .s-partial, .s-unclear, .s-medium { background: var(--warn-soft); color: var(--warn); }
+  .s-missing, .s-not_met, .s-high { background: var(--bad-soft); color: var(--bad); }
+  .s-low { background: var(--accent-soft); color: var(--accent); }
+  .kw-stats { display: flex; flex-wrap: wrap; gap: 16px; margin: -4px 0 12px; color: var(--muted); font-size: .9rem; }
+  .kw-stats strong { color: var(--text); }
+  h3 { font-size: .95rem; margin: 16px 0 6px; }
+  .quote { font-style: italic; color: var(--muted); }
+  .issue { border-top: 1px solid var(--border); padding: 10px 0; }
+  .issue:first-of-type { border-top: none; padding-top: 0; }
+  .issue-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-weight: 600; }
+  .area { font-size: .78rem; color: var(--muted); font-weight: 400; }
+  .fix { margin: 4px 0 0; padding-left: 10px; border-left: 3px solid var(--accent); }
+  ul.plain { margin: 0; padding-left: 20px; }
+  .rw { border-top: 1px solid var(--border); padding: 12px 0; }
+  .rw:first-of-type { border-top: none; padding-top: 0; }
+  .rw-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0; }
+  .rw-grid div { padding: 8px 10px; border-radius: 8px; font-size: .92rem; white-space: pre-wrap; }
+  .rw-before { background: var(--bad-soft); } .rw-after { background: var(--ok-soft); }
+  .rw-grid b { display: block; font-size: .75rem; color: var(--muted); }
+  .rw p { margin: 0; color: var(--muted); font-size: .88rem; }
+  .note { color: var(--muted); font-size: .85rem; }
+  .rw-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .rw-top h2 { margin: 0; }
+  .cta { background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; padding: 7px 14px; border-radius: 8px; font-size: .92rem; }
+  @media (max-width: 600px) {
+    .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+    .rw-grid { grid-template-columns: 1fr; }
+    .hide-sm { display: none; }
+  }
+  @media print {
+    :root { --bg: #fff; --surface: #fff; --text: #000; --muted: #444; --border: #bbb; --accent: #333; --accent-soft: #f2f2f2;
+      --ok: #0a6b2d; --ok-soft: #eef7f0; --bad: #a33; --bad-soft: #fbeeee; --warn: #7a5a00; --warn-soft: #fbf5e6; }
+    body { font-size: 10.5pt; }
+    .wrap { max-width: none; padding: 0; }
+    .top button, .back, .cta { display: none !important; }
+    section { border: 1px solid #999; padding: 10px 12px; margin: 8px 0; }
+    .gauge, .bar > div, .pill, .rw-grid div { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="back" href="/">← {{t $l "back"}}</a>
+    <button type="button" onclick="window.print()">{{t $l "print"}}</button>
+  </div>
+
+  <header>
+    <h1>{{$r.Title}}</h1>
+    <p class="sub">{{t $l "heading"}} · {{$r.Role}}{{if $r.Company}} · {{$r.Company}}{{end}}{{if .CV}} · {{t $l "cv"}}: {{.CV}}{{end}}</p>
+  </header>
+
+  <section class="hero {{band $r.Score}}">
+    <div class="gauge" style="--p: {{$r.Score}}"><div><span><strong>{{$r.Score}}</strong><br><small>{{t $l "score"}}</small></span></div></div>
+    <div>
+      <p class="verdict">{{t $l $r.Verdict}}</p>
+      <p class="sub">{{t $l (print "verdict_" $r.Verdict)}}</p>
+      <p class="summary">{{$r.Summary}}</p>
+      {{- with $r.KnockoutsFailed}}
+      <p class="alert">{{.}} {{if eq . 1}}{{t $l "knockout_warn"}}{{else}}{{t $l "knockout_warn_n"}}{{end}}</p>
+      {{- end}}
+    </div>
+  </section>
+
+  <section>
+    <h2>{{t $l "categories"}}</h2>
+    {{- range $r.Categories}}
+    <div class="cat {{band .Score}}">
+      <div class="cat-head">{{.Name}} <span>{{.Score}}/100 · {{t $l "weight"}} {{weight .ID}}%</span></div>
+      <div class="bar"><div style="width: {{.Score}}%"></div></div>
+      <p>{{.Comment}}</p>
+    </div>
+    {{- end}}
+  </section>
+
+  {{- if $r.Knockouts}}
+  <section>
+    <h2>{{t $l "knockouts"}}</h2>
+    <table>
+      {{- range $r.Knockouts}}
+      <tr><td><strong>{{.Requirement}}</strong><br><span class="note">{{.Detail}}</span></td>
+          <td style="text-align:right"><span class="pill s-{{.Status}}">{{t $l .Status}}</span></td></tr>
+      {{- end}}
+    </table>
+  </section>
+  {{- end}}
+
+  <section>
+    <h2>{{t $l "keywords"}}</h2>
+    <div class="kw-stats">
+      {{- if .ReqTotal}}<span>{{t $l "required"}}: <strong>{{.ReqFound}} {{t $l "of"}} {{.ReqTotal}}</strong> {{t $l "present"}}{{if .ReqPartial}} (+{{.ReqPartial}} {{t $l "partial"}}){{end}}</span>{{end}}
+      {{- if .PrefTotal}}<span>{{t $l "preferred"}}: <strong>{{.PrefFound}} {{t $l "of"}} {{.PrefTotal}}</strong> {{t $l "present"}}{{if .PrefPartial}} (+{{.PrefPartial}} {{t $l "partial"}}){{end}}</span>{{end}}
+    </div>
+    <table>
+      <tr><th>Keyword</th><th></th><th class="hide-sm">{{t $l "evidence"}} / {{t $l "suggestion"}}</th></tr>
+      {{- range $r.Keywords}}
+      <tr>
+        <td><strong>{{.Keyword}}</strong><br><span class="note">{{t $l .Importance}}</span></td>
+        <td><span class="pill s-{{.Status}}">{{t $l .Status}}</span></td>
+        <td>{{if .Evidence}}<span class="quote">“{{.Evidence}}”</span>{{end}}{{if and .Evidence .Suggestion}}<br>{{end}}{{.Suggestion}}</td>
+      </tr>
+      {{- end}}
+    </table>
+  </section>
+
+  <section>
+    <h2>{{t $l "issues"}}</h2>
+    {{- range $r.Issues}}
+    <div class="issue">
+      <div class="issue-head"><span class="pill s-{{.Severity}}">{{t $l .Severity}}</span> {{.Problem}} <span class="area">· {{t $l (print "area_" .Area)}}</span></div>
+      <p class="fix">{{.Fix}}</p>
+    </div>
+    {{- else}}
+    <p class="note">{{t $l "none_issues"}}</p>
+    {{- end}}
+  </section>
+
+  {{- if $r.Strengths}}
+  <section>
+    <h2>{{t $l "strengths"}}</h2>
+    <ul class="plain">{{range $r.Strengths}}<li>{{.}}</li>{{end}}</ul>
+  </section>
+  {{- end}}
+
+  {{- if $r.Rewrites}}
+  <section>
+    <div class="rw-top">
+      <h2>{{t $l "rewrites"}}</h2>
+      {{- if $r.CVMarkdown}}<a class="cta" href="/cv/{{.ID}}">{{t $l "edit_cta"}}</a>{{end}}
+    </div>
+    {{- range $r.Rewrites}}
+    <div class="rw">
+      <strong>{{.Section}}</strong>{{if .Type}} <span class="pill {{if eq .Type "add_keyword"}}s-partial{{else}}s-low{{end}}">{{t $l .Type}}</span>{{end}}
+      <div class="rw-grid">
+        <div class="rw-before"><b>{{t $l "before"}}</b>{{.Before}}</div>
+        <div class="rw-after"><b>{{t $l "after"}}</b>{{.After}}</div>
+      </div>
+      <p>{{.Why}}</p>
+    </div>
+    {{- end}}
+    <p class="note">{{t $l "honesty"}}</p>
+  </section>
+  {{- end}}
+</div>
+</body>
+</html>

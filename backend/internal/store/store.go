@@ -1,6 +1,6 @@
-// Package store keeps every quiz in its own folder under data/quizzes/<id>/.
-// No database: meta.json holds the state, questions.json the generated
-// questions and quiz.html the rendered quiz.
+// Package store keeps every quiz and ATS report in its own folder under
+// data/quizzes/<id>/. No database: meta.json holds the state, questions.json
+// (or ats.json) the generated data and quiz.html (or report.html) the page.
 package store
 
 import (
@@ -26,6 +26,12 @@ const (
 	StatusError      = "error"
 )
 
+// Kinds of generation. Quizzes predate the field, so "" means quiz.
+const (
+	KindQuiz = ""
+	KindATS  = "ats"
+)
+
 type Attempt struct {
 	Score   float64   `json:"score"`
 	Correct int       `json:"correct"`
@@ -33,8 +39,15 @@ type Attempt struct {
 	At      time.Time `json:"at"`
 }
 
+// ATSResult is the summary of an ATS report shown in the history.
+type ATSResult struct {
+	Score   int    `json:"score"`   // 0-100
+	Verdict string `json:"verdict"` // pass | borderline | reject
+}
+
 type Meta struct {
 	ID         string `json:"id"`
+	Kind       string `json:"kind,omitempty"` // "" (quiz) | "ats"
 	Title      string `json:"title"`
 	Role       string `json:"role"`
 	Seniority  string `json:"seniority"`
@@ -54,6 +67,11 @@ type Meta struct {
 	CreatedAt       time.Time `json:"createdAt"`
 	LastAttempt     *Attempt  `json:"lastAttempt,omitempty"`
 	Attempts        int       `json:"attempts"`
+
+	// ATS reports only.
+	CVFile   string     `json:"cvFile,omitempty"`   // file name inside the folder
+	CVSource string     `json:"cvSource,omitempty"` // original CV filename
+	ATS      *ATSResult `json:"ats,omitempty"`
 }
 
 var ErrNotFound = errors.New("quiz not found")
@@ -106,6 +124,11 @@ func (s *Store) EnsureHash(m *Meta) {
 	_ = s.Save(m)
 }
 
+// WriteFile stores an extra file (e.g. the CV) inside an item's folder.
+func (s *Store) WriteFile(id, name string, data []byte) error {
+	return os.WriteFile(s.Path(id, name), data, 0o644)
+}
+
 // SameInput returns the ready quizzes (other than exceptID) generated from
 // the same requirement, oldest first.
 func (s *Store) SameInput(hash, exceptID string) ([]*Meta, error) {
@@ -116,7 +139,7 @@ func (s *Store) SameInput(hash, exceptID string) ([]*Meta, error) {
 	var out []*Meta
 	for i := len(all) - 1; i >= 0; i-- {
 		m := all[i]
-		if m.ID == exceptID || m.Status != StatusReady {
+		if m.ID == exceptID || m.Status != StatusReady || m.Kind != KindQuiz {
 			continue
 		}
 		s.EnsureHash(m)

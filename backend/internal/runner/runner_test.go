@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"reqtoquiz/internal/ats"
 	"reqtoquiz/internal/quiz"
 	"reqtoquiz/internal/store"
 )
@@ -19,6 +20,7 @@ type fakeEngine struct {
 	id        string
 	fail      error
 	quiz      func(req Request) *quiz.Quiz
+	report    func(req Request) *ats.Report
 	loggedOut bool
 	calls     int
 	fixes     []string
@@ -41,7 +43,13 @@ func (f *fakeEngine) Run(_ context.Context, req Request, _ string, progress Prog
 	if f.fail != nil {
 		return "", f.fail
 	}
-	data, _ := json.Marshal(f.quiz(req))
+	var out any
+	if req.Skill == "ats-check" {
+		out = f.report(req)
+	} else {
+		out = f.quiz(req)
+	}
+	data, _ := json.Marshal(out)
 	return "s1", os.WriteFile(req.OutputPath, data, 0o644)
 }
 

@@ -1,4 +1,5 @@
-// Package api exposes the HTTP endpoints used by the Vue app and the quiz page.
+// Package api exposes the HTTP endpoints used by the Vue app, the quiz page
+// and the ATS report.
 package api
 
 import (
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"reqtoquiz/internal/ats"
 	"reqtoquiz/internal/runner"
 	"reqtoquiz/internal/store"
 )
@@ -43,7 +45,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/quizzes/{id}", s.delete)
 	mux.HandleFunc("GET /api/quizzes/{id}/events", s.events)
 	mux.HandleFunc("POST /api/quizzes/{id}/attempts", s.attempt)
+	mux.HandleFunc("POST /api/ats", s.createATS)
+	mux.HandleFunc("GET /api/ats/{id}/report", s.atsReport)
 	mux.HandleFunc("GET /quizzes/{id}/{$}", s.quizPage)
+	mux.HandleFunc("GET /ats/{id}/{$}", s.reportPage)
+	mux.HandleFunc("GET /ats/{id}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ats/"+r.PathValue("id")+"/", http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("GET /quizzes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/quizzes/"+r.PathValue("id")+"/", http.StatusMovedPermanently)
 	})
@@ -104,67 +112,24 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+1<<20)
-	if err := r.ParseMultipartForm(maxUpload); err != nil {
-		writeErr(w, http.StatusBadRequest, "el archivo es demasiado grande (máx. 20 MB) o el formulario es inválido")
+	lang, engineChoice, ok := s.parseForm(w, r)
+	if !ok {
 		return
 	}
 	count, _ := strconv.Atoi(r.FormValue("count"))
-	lang, diff := r.FormValue("language"), r.FormValue("difficulty")
+	diff := r.FormValue("difficulty")
 	if !validCounts[count] {
 		writeErr(w, http.StatusBadRequest, "cantidad de preguntas inválida (5, 10, 20, 30 o 40)")
-		return
-	}
-	if !validLanguages[lang] {
-		writeErr(w, http.StatusBadRequest, "idioma inválido")
 		return
 	}
 	if !validDifficulty[diff] {
 		writeErr(w, http.StatusBadRequest, "dificultad inválida")
 		return
 	}
-	engineChoice := r.FormValue("engine")
-	if engineChoice == "" {
-		engineChoice = runner.ChoiceAuto
-	}
-	// Fail fast: chosen engine not installed or without a session.
-	if err := s.Runner.CheckChoice(r.Context(), engineChoice); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
-	var (
-		input     []byte
-		inputName string
-		source    string
-	)
-	if file, hdr, err := r.FormFile("file"); err == nil {
-		defer file.Close()
-		ext := strings.ToLower(filepath.Ext(hdr.Filename))
-		if !allowedInputExts[ext] {
-			writeErr(w, http.StatusBadRequest, "formato no soportado: subí un .pdf, .md o .txt")
-			return
-		}
-		if ext == ".markdown" {
-			ext = ".md"
-		}
-		if input, err = io.ReadAll(file); err != nil {
-			writeErr(w, http.StatusBadRequest, "no se pudo leer el archivo")
-			return
-		}
-		if ext == ".pdf" && !strings.HasPrefix(string(input[:min(len(input), 5)]), "%PDF") {
-			writeErr(w, http.StatusBadRequest, "el archivo no parece ser un PDF válido")
-			return
-		}
-		inputName, source = "input"+ext, filepath.Base(hdr.Filename)
-	} else if text := strings.TrimSpace(r.FormValue("text")); text != "" {
-		input, inputName, source = []byte(text), "input.md", "texto pegado"
-	} else {
-		writeErr(w, http.StatusBadRequest, "subí un archivo o pegá el texto del requerimiento")
-		return
-	}
-	if len(strings.TrimSpace(string(input))) < 40 && !strings.HasSuffix(inputName, ".pdf") {
-		writeErr(w, http.StatusBadRequest, "el requerimiento es demasiado corto")
+	input, inputName, source, msg := readUpload(r, "file", "text", "input", "requerimiento")
+	if msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -179,6 +144,116 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Runner.Start(m)
 	writeJSON(w, http.StatusCreated, m)
+}
+
+// readUpload reads an uploaded file (fileField) or, if there is none, pasted
+// text (textField, "" to disallow). The file is stored as base+ext. what names
+// the document in error messages. msg is non-empty on a user error.
+func readUpload(r *http.Request, fileField, textField, base, what string) (data []byte, name, source, msg string) {
+	if file, hdr, err := r.FormFile(fileField); err == nil {
+		defer file.Close()
+		ext := strings.ToLower(filepath.Ext(hdr.Filename))
+		if !allowedInputExts[ext] {
+			return nil, "", "", "formato no soportado para el " + what + ": subí un .pdf, .md o .txt"
+		}
+		if ext == ".markdown" {
+			ext = ".md"
+		}
+		if data, err = io.ReadAll(file); err != nil {
+			return nil, "", "", "no se pudo leer el archivo del " + what
+		}
+		if ext == ".pdf" && !strings.HasPrefix(string(data[:min(len(data), 5)]), "%PDF") {
+			return nil, "", "", "el " + what + " no parece ser un PDF válido"
+		}
+		name, source = base+ext, filepath.Base(hdr.Filename)
+	} else if text := strings.TrimSpace(r.FormValue(textField)); textField != "" && text != "" {
+		data, name, source = []byte(text), base+".md", "texto pegado"
+	} else if textField != "" {
+		return nil, "", "", "subí un archivo o pegá el texto del " + what
+	} else {
+		return nil, "", "", "subí el " + what
+	}
+	if len(strings.TrimSpace(string(data))) < 40 && !strings.HasSuffix(name, ".pdf") {
+		return nil, "", "", "el " + what + " es demasiado corto"
+	}
+	return data, name, source, ""
+}
+
+// parseForm parses the multipart form and the fields shared by every kind.
+func (s *Server) parseForm(w http.ResponseWriter, r *http.Request) (lang, engine string, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2*maxUpload+1<<20)
+	if err := r.ParseMultipartForm(maxUpload); err != nil {
+		writeErr(w, http.StatusBadRequest, "los archivos son demasiado grandes (máx. 20 MB cada uno) o el formulario es inválido")
+		return "", "", false
+	}
+	lang = r.FormValue("language")
+	if !validLanguages[lang] {
+		writeErr(w, http.StatusBadRequest, "idioma inválido")
+		return "", "", false
+	}
+	engine = r.FormValue("engine")
+	if engine == "" {
+		engine = runner.ChoiceAuto
+	}
+	// Fail fast: chosen engine not installed or without a session.
+	if err := s.Runner.CheckChoice(r.Context(), engine); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return "", "", false
+	}
+	return lang, engine, true
+}
+
+// createATS starts an ATS check: job requirement (file or text) + CV (file).
+func (s *Server) createATS(w http.ResponseWriter, r *http.Request) {
+	lang, engine, ok := s.parseForm(w, r)
+	if !ok {
+		return
+	}
+	job, jobName, jobSource, msg := readUpload(r, "file", "text", "input", "requerimiento")
+	if msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	cv, cvName, cvSource, msg := readUpload(r, "cv", "", "cv", "CV")
+	if msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	m := &store.Meta{
+		ID: store.NewID(), Kind: store.KindATS, Language: lang, EngineChoice: engine,
+		Source: jobSource, CVFile: cvName, CVSource: cvSource,
+		Status: store.StatusGenerating, CreatedAt: time.Now(),
+		Title: "CV vs " + strings.TrimSuffix(jobSource, filepath.Ext(jobSource)),
+	}
+	if err := s.Store.Create(m, jobName, job); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.Store.WriteFile(m.ID, cvName, cv); err != nil {
+		_ = s.Store.Delete(m.ID)
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Runner.Start(m)
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// atsReport returns a ready ATS report (with the CV transcription and the
+// suggested rewrites) for the CV editor.
+func (s *Server) atsReport(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	m, err := s.Store.Get(id)
+	if err != nil || m.Kind != store.KindATS || m.Status != store.StatusReady {
+		writeErr(w, http.StatusNotFound, "análisis ATS no encontrado")
+		return
+	}
+	rep, err := ats.Load(s.Store.Path(id, "ats.json"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ats.Finalize(rep)
+	writeJSON(w, http.StatusOK, map[string]any{"meta": m, "report": rep})
 }
 
 func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +315,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		// Not generating in this process: answer from what is on disk.
 		switch m.Status {
 		case store.StatusReady:
-			send(runner.Event{Type: "done", Step: runner.StepDone, URL: "/quizzes/" + id + "/"})
+			send(runner.Event{Type: "done", Step: runner.StepDone, URL: runner.PageURL(m)})
 		case store.StatusError:
 			send(runner.Event{Type: "error", Message: m.Error})
 		default:
@@ -282,14 +357,22 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) quizPage(w http.ResponseWriter, r *http.Request) {
+	s.page(w, r, store.KindQuiz, "quiz.html")
+}
+
+func (s *Server) reportPage(w http.ResponseWriter, r *http.Request) {
+	s.page(w, r, store.KindATS, "report.html")
+}
+
+func (s *Server) page(w http.ResponseWriter, r *http.Request, kind, file string) {
 	id := r.PathValue("id")
 	m, err := s.Store.Get(id)
-	if err != nil || m.Status != store.StatusReady {
+	if err != nil || m.Status != store.StatusReady || m.Kind != kind {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, s.Store.Path(id, "quiz.html"))
+	http.ServeFile(w, r, s.Store.Path(id, file))
 }
 
 // spa serves the built Vue app, falling back to index.html for client routes.

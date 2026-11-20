@@ -4,6 +4,8 @@ Generá un quiz multiple choice para practicar una entrevista a partir del **req
 
 Subís el aviso (PDF, Markdown o texto pegado), elegís cuántas preguntas querés (5, 10, 20, 30 o 40), el idioma y la dificultad, y **Claude Code** genera las preguntas por detrás usando una skill propia del repo. Cuando termina, la app te lleva al quiz: lo rendís, ves tu **porcentaje**, revisás las explicaciones y podés **imprimir las respuestas**. Cada quiz queda guardado en un historial para volver a rendirlo.
 
+También tiene un **filtro ATS**: subís el aviso y **tu CV**, y te dice qué puntaje le pondría un ATS (el software que filtra postulaciones), qué palabras clave te faltan, qué requisitos excluyentes no cumplís, qué partes del formato el ATS no puede leer y cómo reescribir tus bullets, sin inventar nada que no esté en tu CV.
+
 Es una app **local**: corre en tu máquina, usa tu sesión de Claude Code y no necesita base de datos ni servidor externo. Si Claude Code no está instalado o falla, usa **Codex** como respaldo automático.
 
 ---
@@ -19,6 +21,7 @@ Es una app **local**: corre en tu máquina, usa tu sesión de Claude Code y no n
 - [Arquitectura](#arquitectura)
 - [Estructura del repo](#estructura-del-repo)
 - [La skill `job-quiz`](#la-skill-job-quiz)
+- [Filtro ATS: la skill `ats-check`](#filtro-ats-la-skill-ats-check)
 - [API del backend](#api-del-backend)
 - [Datos guardados](#datos-guardados)
 - [Desarrollo](#desarrollo)
@@ -282,6 +285,9 @@ ReqToQuiz/
 ├── .claude/skills/job-quiz/
 │   ├── SKILL.md              instrucciones de la skill que genera las preguntas
 │   └── schema.md             formato exacto de questions.json
+├── .claude/skills/ats-check/
+│   ├── SKILL.md              instrucciones del filtro ATS (CV vs puesto)
+│   └── schema.md             formato exacto de ats.json
 ├── backend/                  servidor Go
 │   ├── main.go               flags, detección del repo y de `claude`, arranque
 │   ├── internal/
@@ -290,6 +296,8 @@ ReqToQuiz/
 │   │   ├── quiz/             validación, mezcla y armado del quiz
 │   │   │   ├── quiz.html.tmpl    plantilla de la página del quiz
 │   │   │   └── quiz_test.go      tests
+│   │   ├── ats/              validación, puntaje y armado del informe ATS
+│   │   │   └── report.html.tmpl  plantilla del informe
 │   │   └── store/            persistencia en data/quizzes/
 │   └── web/                  frontend compilado (embebido con go:embed)
 ├── frontend/                 app Vue
@@ -297,7 +305,7 @@ ReqToQuiz/
 │   ├── src/views/GeneratingView.vue  progreso en vivo
 │   ├── src/api.ts                    cliente de la API
 │   └── vite.config.ts                build hacia backend/web/dist y proxy en dev
-├── examples/                 aviso de ejemplo para probar
+├── examples/                 aviso y CV ficticio de ejemplo para probar
 ├── data/                     quizzes generados (ignorado por git)
 └── package.json              scripts: setup, dev, build, start, test
 ```
@@ -352,6 +360,44 @@ También podés usar la skill sin la app, desde Claude Code en este repo:
 
 ---
 
+## Filtro ATS: la skill `ats-check`
+
+En la pantalla principal elegí **Filtro ATS**, subí (o pegá) el requerimiento y subí tu CV (`.pdf`, `.md` o `.txt`). Al terminar te lleva al informe en `/ats/<id>/`, que se puede imprimir.
+
+**Qué revisa**, simulando un ATS (Workday, Greenhouse, Lever…) y al recruiter que mira su ranking:
+
+| Sección | Qué te dice |
+|---|---|
+| Puntaje 0-100 y veredicto | *Pasaría el filtro* (75+), *En el límite* (55-74) o *Probablemente filtrado*. Lo calcula el backend con pesos fijos: palabras clave 40 %, experiencia 30 %, formación 15 %, formato 15 %. |
+| Requisitos excluyentes | Años de experiencia, título, idioma, ubicación…: *Cumple*, *No queda claro* o *No cumple*. Si alguno no se cumple, el veredicto no puede ser "pasaría", porque muchos ATS descartan antes de mirar el puntaje. |
+| Palabras clave | Cada skill o tecnología del aviso, obligatoria o deseable, con *Está*, *Parcial* o *Falta*, la cita de tu CV donde aparece y qué hacer. |
+| Dónde puede fallar | Problemas concretos ordenados por prioridad, cada uno con su arreglo. |
+| Puntos fuertes y reescrituras | Bullets de tu CV reescritos con las palabras del aviso. Solo reformulan lo que ya está: si falta un número, ponen `[X%]` para que lo completes. |
+
+**Elegir los cambios y descargar el CV.** Desde el informe, *Elegir cambios y descargar CV* abre `/cv/<id>`:
+
+- Cada sugerencia se ve como un diff palabra por palabra (lo que se borra tachado, lo que se agrega resaltado) con **Aceptar**, **Rechazar** y **Editar texto**. Las de tipo *Agrega keyword* avisan que las aceptes solo si es verdad.
+- Abajo hay una vista previa del CV con los cambios aceptados resaltados.
+- **Descargar CV en PDF** genera un PDF de una columna con texto real (no una imagen), que es lo que mejor leen los ATS. También se puede bajar en `.md`.
+- Si quedó algún dato por completar, como `[X%]`, la descarga se bloquea hasta que lo edites.
+- Tus decisiones se guardan en el navegador, así que podés volver más tarde.
+
+Para que esto funcione, la skill transcribe el CV completo a Markdown (`cvMarkdown`) y cada sugerencia cita texto exacto de esa transcripción. El backend lo verifica y, si una cita no aparece, le pide al motor que la corrija.
+
+**El formato también cuenta.** Si el CV es un PDF, antes de llamar al motor el backend extrae el texto con un extractor común (`cv-parsed.txt`), como haría un ATS. La skill compara ese texto con el PDF y detecta lo que se pierde: columnas mezcladas, tablas, íconos en vez de datos de contacto, texto dentro de imágenes. Si no se puede extraer nada (un PDF escaneado), lo marca como problema grave.
+
+**Privacidad:** el CV se guarda solo en `data/quizzes/<id>/cv.*`, que está en `.gitignore`, y solo lo lee el motor que elijas (Claude Code o Codex, con tu sesión).
+
+Se puede usar sin la app, desde Claude Code en este repo:
+
+```
+/ats-check job: examples/backend-go-developer.md cv: examples/cv-ejemplo.md language: es output: data/test/ats.json
+```
+
+El formato de `ats.json` está en [`schema.md`](.claude/skills/ats-check/schema.md) y la validación en `backend/internal/ats/ats.go`.
+
+---
+
 ## API del backend
 
 | Método | Ruta | Descripción |
@@ -362,8 +408,11 @@ También podés usar la skill sin la app, desde Claude Code en este repo:
 | `GET` | `/api/quizzes/{id}` | Datos de un quiz. |
 | `DELETE` | `/api/quizzes/{id}` | Borra un quiz (no se puede mientras se genera). |
 | `GET` | `/api/quizzes/{id}/events` | Progreso por Server-Sent Events: `progress`, `done` (con `url`) o `error`. |
+| `POST` | `/api/ats` | Crea un análisis ATS. Multipart: `file` **o** `text` (el puesto), `cv` (archivo), `language` y `engine` opcional. Aparece en el mismo historial con `"kind": "ats"` y, cuando termina, `"ats": { "score": 66, "verdict": "borderline" }`. |
 | `POST` | `/api/quizzes/{id}/attempts` | Guarda un intento: `{ "score": 80, "correct": 4, "total": 5 }`. |
 | `GET` | `/quizzes/{id}/` | Página del quiz. |
+| `GET` | `/ats/{id}/` | Informe ATS. |
+| `GET` | `/api/ats/{id}/report` | Informe ATS en JSON (con `cvMarkdown` y `rewrites`), lo usa el editor del CV. |
 | `GET` | `/*` | Frontend Vue. |
 
 Ejemplo con curl:
@@ -390,6 +439,8 @@ Cada quiz vive en `data/quizzes/<id>/`, con un id del tipo `20261117-112145-0b23
 | `input-extracted.txt`, `codex-schema.json` | solo si intervino Codex: el texto extraído del PDF y el schema de su respuesta |
 | `questions.json` | lo que escribió Claude |
 | `quiz.html` | la página del quiz, que funciona sola y se puede abrir sin el servidor |
+| `cv.pdf` / `cv.md`, `cv-parsed.txt` | solo en análisis ATS: tu CV y el texto que extrae un ATS de él |
+| `ats.json`, `report.html` | solo en análisis ATS: lo que escribió el motor y el informe |
 
 `data/` está en `.gitignore`. Para borrar todo el historial, eliminá esa carpeta.
 
@@ -409,6 +460,8 @@ En desarrollo abrí **http://localhost:5173**: Vite redirige `/api` y `/quizzes`
 |---|---|
 | Qué preguntas se generan | `.claude/skills/job-quiz/SKILL.md` |
 | Diseño o comportamiento de la página del quiz | `backend/internal/quiz/quiz.html.tmpl` |
+| Qué revisa el filtro ATS | `.claude/skills/ats-check/SKILL.md` |
+| Pesos del puntaje ATS y diseño del informe | `backend/internal/ats/ats.go`, `report.html.tmpl` |
 | Validaciones del JSON | `backend/internal/quiz/quiz.go` |
 | Qué cuenta como pregunta repetida | `backend/internal/quiz/similar.go` (umbrales y stopwords) |
 | Cómo se reconoce el mismo requerimiento | `HashInput` en `backend/internal/store/store.go` |

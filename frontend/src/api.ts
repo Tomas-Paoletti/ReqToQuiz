@@ -31,8 +31,13 @@ export interface Attempt {
   at: string;
 }
 
+export type Kind = "quiz" | "ats";
+export type Verdict = "pass" | "borderline" | "reject";
+
 export interface QuizMeta {
   id: string;
+  /** Absent on quizzes. */
+  kind?: "ats";
   title: string;
   role: string;
   seniority: string;
@@ -49,7 +54,18 @@ export interface QuizMeta {
   createdAt: string;
   lastAttempt?: Attempt;
   attempts: number;
+  /** ATS reports only. */
+  cvSource?: string;
+  ats?: { score: number; verdict: Verdict };
 }
+
+export const kindOf = (m: QuizMeta): Kind => (m.kind === "ats" ? "ats" : "quiz");
+
+export const verdictLabel: Record<Verdict, string> = {
+  pass: "Pasaría el filtro",
+  borderline: "En el límite",
+  reject: "Probablemente filtrado",
+};
 
 export interface ProgressEvent {
   type: "progress" | "done" | "error";
@@ -96,7 +112,50 @@ export function createQuiz(input: CreateQuizInput) {
   return request<QuizMeta>("/api/quizzes", { method: "POST", body: form });
 }
 
-export const quizUrl = (id: string) => `/quizzes/${id}/`;
+export interface CreateAtsInput {
+  file?: File;
+  text?: string;
+  cv: File;
+  language: Language;
+  engine: EngineChoice;
+}
+
+export function createAts(input: CreateAtsInput) {
+  const form = new FormData();
+  if (input.file) form.append("file", input.file);
+  else form.append("text", input.text ?? "");
+  form.append("cv", input.cv);
+  form.append("language", input.language);
+  form.append("engine", input.engine);
+  return request<QuizMeta>("/api/ats", { method: "POST", body: form });
+}
+
+export interface Rewrite {
+  type: "rephrase" | "add_keyword";
+  section: string;
+  before: string;
+  after: string;
+  why: string;
+}
+
+export interface AtsReport {
+  title: string;
+  role: string;
+  company: string;
+  language: Language;
+  summary: string;
+  score: number;
+  verdict: Verdict;
+  rewrites: Rewrite[];
+  /** Whole CV transcribed to simple Markdown; absent on reports made before the editor existed. */
+  cvMarkdown?: string;
+}
+
+export const getAtsReport = (id: string) =>
+  request<{ meta: QuizMeta; report: AtsReport }>(`/api/ats/${id}/report`);
+
+/** Page of a ready quiz or ATS report. */
+export const pageUrl = (m: QuizMeta) => (kindOf(m) === "ats" ? `/ats/${m.id}/` : `/quizzes/${m.id}/`);
 
 export const difficultyLabel: Record<Difficulty, string> = {
   junior: "Junior",

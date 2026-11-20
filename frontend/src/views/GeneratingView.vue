@@ -1,19 +1,21 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { engineLabel, getQuiz, type EngineId, type ProgressEvent, type QuizMeta } from "../api";
+import { engineLabel, getQuiz, kindOf, type EngineId, type ProgressEvent, type QuizMeta } from "../api";
 
 const props = defineProps<{ id: string }>();
 
-const steps = [
+const meta = ref<QuizMeta | null>(null);
+const isAts = computed(() => !!meta.value && kindOf(meta.value) === "ats");
+
+const steps = computed(() => [
   { key: "start", label: "Iniciando el generador" },
   { key: "skill", label: "Cargando la skill" },
-  { key: "read", label: "Leyendo el requerimiento" },
-  { key: "generate", label: "Generando las preguntas" },
-  { key: "write", label: "Guardando el quiz" },
+  { key: "read", label: isAts.value ? "Leyendo el puesto y tu CV" : "Leyendo el requerimiento" },
+  { key: "generate", label: isAts.value ? "Comparando tu CV con el puesto" : "Generando las preguntas" },
+  { key: "write", label: isAts.value ? "Guardando el informe" : "Guardando el quiz" },
   { key: "validate", label: "Validando" },
-];
+]);
 
-const meta = ref<QuizMeta | null>(null);
 const current = ref("start");
 const message = ref("Conectando…");
 const error = ref("");
@@ -23,7 +25,7 @@ const elapsed = ref(0);
 let source: EventSource | null = null;
 let timer: number | undefined;
 
-const currentIndex = computed(() => steps.findIndex((s) => s.key === current.value));
+const currentIndex = computed(() => steps.value.findIndex((s) => s.key === current.value));
 
 function stepState(i: number) {
   if (done.value || i < currentIndex.value) return "done";
@@ -33,11 +35,11 @@ function stepState(i: number) {
 
 function handle(e: ProgressEvent) {
   if (e.engine) engine.value = e.engine;
-  if (e.step && steps.some((s) => s.key === e.step)) current.value = e.step;
+  if (e.step && steps.value.some((s) => s.key === e.step)) current.value = e.step;
   if (e.message) message.value = e.message;
   if (e.type === "done" && e.url) {
     done.value = true;
-    message.value = "¡Quiz listo! Abriendo…";
+    message.value = (e.message || "¡Listo!") + " Abriendo…";
     source?.close();
     window.clearInterval(timer);
     window.location.href = e.url;
@@ -78,9 +80,11 @@ const elapsedLabel = computed(() => {
 
 <template>
   <section class="card">
-    <h2>{{ error ? "No se pudo generar el quiz" : "Generando tu quiz…" }}</h2>
+    <h2 v-if="isAts">{{ error ? "No se pudo analizar el CV" : "Analizando tu CV…" }}</h2>
+    <h2 v-else>{{ error ? "No se pudo generar el quiz" : "Generando tu quiz…" }}</h2>
     <p v-if="meta" class="muted sub">
-      {{ meta.source }} · {{ meta.count }} preguntas
+      <template v-if="isAts">CV: {{ meta.cvSource }} · puesto: {{ meta.source }}</template>
+      <template v-else>{{ meta.source }} · {{ meta.count }} preguntas</template>
       <template v-if="engine"> · con {{ engineLabel[engine] }}</template>
     </p>
 
@@ -99,7 +103,7 @@ const elapsedLabel = computed(() => {
       <span>{{ message }}</span>
       <span class="muted">{{ elapsedLabel }}</span>
     </div>
-    <p v-if="!error" class="muted hint">Suele tardar entre 30 segundos y 3 minutos según la cantidad de preguntas.</p>
+    <p v-if="!error" class="muted hint">{{ isAts ? "Suele tardar entre 1 y 3 minutos." : "Suele tardar entre 30 segundos y 3 minutos según la cantidad de preguntas." }}</p>
 
     <template v-if="error">
       <p class="error-box">{{ error }}</p>

@@ -1,6 +1,6 @@
-// Package runner generates quizzes with a headless coding agent (Claude Code,
-// falling back to Codex), turns its output into progress events and, when it
-// finishes, validates and renders the quiz.
+// Package runner generates quizzes and ATS reports with a headless coding
+// agent (Claude Code, falling back to Codex), turns its output into progress
+// events and, when it finishes, validates and renders the result.
 package runner
 
 import (
@@ -103,7 +103,7 @@ var (
 const ChoiceAuto = "auto"
 
 type Manager struct {
-	Root    string   // repo root: cwd of the engines, holds .claude/skills/job-quiz
+	Root    string   // repo root: cwd of the engines, holds .claude/skills
 	Engines []Engine // installed engines, in fallback order
 	Missing []string // ids of known engines that are not installed
 	Timeout time.Duration
@@ -211,14 +211,17 @@ func (m *Manager) run(meta *store.Meta, job *Job) {
 	select {
 	case m.sem <- struct{}{}:
 	default:
-		job.emit(Event{Type: "progress", Step: StepQueue, Message: "Esperando a que termine otro quiz en curso…"})
+		job.emit(Event{Type: "progress", Step: StepQueue, Message: "Esperando a que termine otra generación en curso…"})
 		m.sem <- struct{}{}
 	}
 	defer func() { <-m.sem }()
 
-	err := m.generate(meta, job)
+	t, err := m.newTask(meta, job)
+	if err == nil {
+		err = m.execute(meta, job, t)
+	}
 	if err != nil {
-		log.Printf("quiz %s: %v", meta.ID, err)
+		log.Printf("%s %s: %v", t.kind, meta.ID, err)
 		_, _ = m.Store.Update(meta.ID, func(mm *store.Meta) {
 			mm.Status = store.StatusError
 			mm.Error = err.Error()
@@ -226,36 +229,63 @@ func (m *Manager) run(meta *store.Meta, job *Job) {
 		job.emit(Event{Type: "error", Message: err.Error()})
 		return
 	}
-	job.emit(Event{Type: "done", Step: StepDone, Message: "¡Quiz listo!", URL: "/quizzes/" + meta.ID + "/"})
+	job.emit(Event{Type: "done", Step: StepDone, Message: t.doneMsg, URL: PageURL(meta)})
 }
 
-func (m *Manager) generate(meta *store.Meta, job *Job) error {
-	engines, err := m.plan(meta.EngineChoice)
-	if err != nil {
-		return err
+// PageURL is where a ready quiz or ATS report is served.
+func PageURL(meta *store.Meta) string {
+	if meta.Kind == store.KindATS {
+		return "/ats/" + meta.ID + "/"
 	}
-	auto := meta.EngineChoice == "" || meta.EngineChoice == ChoiceAuto
-	job.emit(Event{Type: "progress", Step: StepStart, Message: "Preparando la generación…"})
+	return "/quizzes/" + meta.ID + "/"
+}
 
-	req := Request{
-		Root:       m.Root,
-		QuizDir:    m.Store.Path(meta.ID),
-		InputPath:  m.Store.Path(meta.ID, meta.InputFile),
-		OutputPath: m.Store.Path(meta.ID, "questions.json"),
-		Count:      meta.Count,
-		Language:   meta.Language,
-		Difficulty: meta.Difficulty,
+// task is one kind of generation (quiz or ATS report) run by the engines.
+type task struct {
+	kind     string // for logs
+	req      Request
+	doneMsg  string
+	validate func() error         // checks the output file; the error is sent back on retry
+	finish   func(e Engine) error // renders the page and marks the meta ready
+}
+
+func (m *Manager) newTask(meta *store.Meta, job *Job) (task, error) {
+	job.emit(Event{Type: "progress", Step: StepStart, Message: "Preparando la generación…"})
+	if meta.Kind == store.KindATS {
+		return m.atsTask(meta, job)
 	}
+	return m.quizTask(meta, job)
+}
+
+func (m *Manager) quizTask(meta *store.Meta, job *Job) (task, error) {
+	req := Request{
+		Root:        m.Root,
+		QuizDir:     m.Store.Path(meta.ID),
+		Skill:       "job-quiz",
+		Inputs:      []Input{{Key: "input", Path: m.Store.Path(meta.ID, meta.InputFile), Label: "el requerimiento del puesto"}},
+		OutputPath:  m.Store.Path(meta.ID, "questions.json"),
+		CodexSchema: codexSchema,
+		Count:       meta.Count,
+		Language:    meta.Language,
+		Difficulty:  meta.Difficulty,
+		Labels: Labels{
+			Think: "Analizando el puesto y pensando las preguntas…",
+			Write: "Escribiendo las preguntas…",
+			Save:  "Guardando el quiz…",
+			Noun:  "el quiz",
+		},
+	}
+	t := task{kind: "quiz", doneMsg: "¡Quiz listo!"}
 
 	// Same requirement used before? Collect those questions so they are not repeated.
 	previous, err := m.previousQuestions(meta)
 	if err != nil {
-		return err
+		return t, err
 	}
 	if len(previous) > 0 {
 		req.AvoidPath = m.Store.Path(meta.ID, "avoid.md")
 		if err := writeAvoidFile(req.AvoidPath, previous); err != nil {
-			return err
+			return t, err
 		}
 		prev := "1 quiz"
 		if meta.PreviousQuizzes > 1 {
@@ -264,11 +294,41 @@ func (m *Manager) generate(meta *store.Meta, job *Job) error {
 		job.emit(Event{Type: "progress", Step: StepStart, Message: fmt.Sprintf(
 			"Ya generaste %s con este requerimiento: las %d preguntas anteriores no se van a repetir.", prev, len(previous))})
 	}
+	req.Params = [][2]string{
+		{"count", fmt.Sprint(req.Count)},
+		{"language", req.Language},
+		{"difficulty", req.Difficulty},
+	}
+	req.FixHint = fmt.Sprintf("The file must have exactly %d questions.", req.Count)
+	if req.AvoidPath != "" {
+		req.Params = append(req.Params, [2]string{"avoid", req.Rel(req.AvoidPath)})
+		req.FixHint += "\nRepeated questions must be replaced by questions about different concepts that are NOT in " +
+			req.Rel(req.AvoidPath) + " (not even rephrased)."
+	}
+
+	var q *quiz.Quiz
+	t.req = req
+	t.validate = func() (err error) {
+		q, err = loadValid(req.OutputPath, req.Count, previous)
+		return err
+	}
+	t.finish = func(e Engine) error { return m.finish(meta, q, e) }
+	return t, nil
+}
+
+// execute tries each planned engine in order; in auto mode it falls back to
+// the next one on any failure.
+func (m *Manager) execute(meta *store.Meta, job *Job, t task) error {
+	engines, err := m.plan(meta.EngineChoice)
+	if err != nil {
+		return err
+	}
+	auto := meta.EngineChoice == "" || meta.EngineChoice == ChoiceAuto
+	noun := t.req.Labels.Noun
 
 	// Fresh session check: the user may have logged in/out since the page loaded.
 	statuses := m.AuthStatuses(context.Background(), true)
 
-	// Try each engine in order; in auto mode fall back to the next one on any failure.
 	var failures []string
 	for _, engine := range engines {
 		if st := statuses[engine.ID()]; !st.Usable() {
@@ -286,46 +346,47 @@ func (m *Manager) generate(meta *store.Meta, job *Job) error {
 		} else {
 			job.emit(Event{Type: "progress", Step: StepStart, Engine: engine.ID(), Message: "Iniciando " + engine.Name() + "…"})
 		}
-		q, err := m.attempt(engine, req, previous, job)
+		err := m.attempt(engine, t, job)
 		if err == nil {
-			return m.finish(meta, q, engine)
+			return t.finish(engine)
 		}
-		log.Printf("quiz %s: %s falló: %v", meta.ID, engine.Name(), err)
-		failures = append(failures, engine.Name()+" no pudo generar el quiz: "+err.Error())
+		log.Printf("%s %s: %s falló: %v", t.kind, meta.ID, engine.Name(), err)
+		failures = append(failures, engine.Name()+" no pudo generar "+noun+": "+err.Error())
 	}
 	if len(failures) == 1 {
 		return errors.New(failures[0])
 	}
-	return errors.New("ningún motor pudo generar el quiz. " + strings.Join(failures, " — "))
+	return errors.New("ningún motor pudo generar " + noun + ". " + strings.Join(failures, " — "))
 }
 
 // attempt runs one engine: a first try and, if the result is invalid, one
 // retry telling the engine what was wrong.
-func (m *Manager) attempt(engine Engine, req Request, previous []quiz.Question, job *Job) (*quiz.Quiz, error) {
+func (m *Manager) attempt(engine Engine, t task, job *Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.Timeout)
 	defer cancel()
 	progress := func(step, msg string) {
 		job.emit(Event{Type: "progress", Step: step, Message: msg, Engine: engine.ID()})
 	}
+	req := t.req
 	_ = os.Remove(req.OutputPath) // never validate a file left by another engine
 
 	session, err := engine.Run(ctx, req, "", progress)
 	if err != nil {
-		return nil, timeoutErr(ctx, m.Timeout, err)
+		return timeoutErr(ctx, m.Timeout, err)
 	}
-	progress(StepValidate, "Validando las preguntas…")
-	q, verr := loadValid(req.OutputPath, req.Count, previous)
+	progress(StepValidate, "Validando el resultado…")
+	verr := t.validate()
 	if verr == nil {
-		return q, nil
+		return nil
 	}
 
-	progress(StepValidate, "Hay preguntas para corregir, pidiéndole a "+engine.Name()+" que las reemplace…")
+	progress(StepValidate, "Hay cosas para corregir, pidiéndole a "+engine.Name()+" que las arregle…")
 	req.Fix = verr.Error()
 	if _, err := engine.Run(ctx, req, session, progress); err != nil {
-		return nil, timeoutErr(ctx, m.Timeout, err)
+		return timeoutErr(ctx, m.Timeout, err)
 	}
-	progress(StepValidate, "Validando las preguntas…")
-	return loadValid(req.OutputPath, req.Count, previous)
+	progress(StepValidate, "Validando el resultado…")
+	return t.validate()
 }
 
 func timeoutErr(ctx context.Context, d time.Duration, err error) error {

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
+  createAts,
   createQuiz,
   deleteQuiz,
   difficultyLabel,
@@ -9,17 +10,30 @@ import {
   getHealth,
   languageLabel,
   listQuizzes,
-  quizUrl,
+  kindOf,
+  pageUrl,
   usable,
+  verdictLabel,
   type Difficulty,
   type EngineChoice,
   type EngineStatus,
   type Health,
+  type Kind,
   type Language,
   type QuizMeta,
 } from "../api";
 
 const router = useRouter();
+const route = useRoute();
+
+/** Which tool the form is for: practice quiz or ATS check (CV vs posting). */
+const kind = ref<Kind>(route.query.tool === "ats" ? "ats" : "quiz");
+watch(kind, (k) => {
+  formError.value = "";
+  router.replace({ query: k === "ats" ? { tool: "ats" } : {} });
+});
+const cv = ref<File | null>(null);
+const cvDragging = ref(false);
 
 const mode = ref<"file" | "text">("file");
 const file = ref<File | null>(null);
@@ -125,22 +139,41 @@ const canSubmit = computed(
   () =>
     !submitting.value &&
     !engineBlocker.value &&
-    (mode.value === "file" ? !!file.value : text.value.trim().length >= 40),
+    (mode.value === "file" ? !!file.value : text.value.trim().length >= 40) &&
+    (kind.value === "quiz" || !!cv.value),
 );
 
-function pickFile(f: File | undefined | null) {
+function checkFile(f: File | undefined | null): f is File {
   formError.value = "";
-  if (!f) return;
+  if (!f) return false;
   const ext = f.name.slice(f.name.lastIndexOf(".")).toLowerCase();
   if (!accepted.includes(ext)) {
     formError.value = "Formato no soportado: subí un .pdf, .md o .txt";
-    return;
+    return false;
   }
   if (f.size > 20 * 1024 * 1024) {
     formError.value = "El archivo supera los 20 MB";
-    return;
+    return false;
   }
-  file.value = f;
+  return true;
+}
+
+function pickFile(f: File | undefined | null) {
+  if (checkFile(f)) file.value = f;
+}
+
+function pickCv(f: File | undefined | null) {
+  if (checkFile(f)) cv.value = f;
+}
+
+function onCvDrop(e: DragEvent) {
+  cvDragging.value = false;
+  pickCv(e.dataTransfer?.files[0]);
+}
+
+function onCvInput(e: Event) {
+  pickCv((e.target as HTMLInputElement).files?.[0]);
+  (e.target as HTMLInputElement).value = "";
 }
 
 function onDrop(e: DragEvent) {
@@ -158,15 +191,17 @@ async function submit() {
   submitting.value = true;
   formError.value = "";
   try {
-    const quiz = await createQuiz({
+    const job = {
       file: mode.value === "file" ? file.value! : undefined,
       text: mode.value === "text" ? text.value : undefined,
-      count: count.value,
       language: language.value,
-      difficulty: difficulty.value,
-      engine: showSelector.value ? engineChoice.value : "auto",
-    });
-    router.push(`/generating/${quiz.id}`);
+      engine: showSelector.value ? engineChoice.value : ("auto" as EngineChoice),
+    };
+    const created =
+      kind.value === "ats"
+        ? await createAts({ ...job, cv: cv.value! })
+        : await createQuiz({ ...job, count: count.value, difficulty: difficulty.value });
+    router.push(`/generating/${created.id}`);
   } catch (e) {
     formError.value = (e as Error).message;
     submitting.value = false;
@@ -195,7 +230,7 @@ async function remove(q: QuizMeta) {
 }
 
 function open(q: QuizMeta) {
-  if (q.status === "ready") window.location.href = quizUrl(q.id);
+  if (q.status === "ready") window.location.href = pageUrl(q);
   else if (q.status === "generating") router.push(`/generating/${q.id}`);
 }
 
@@ -203,6 +238,7 @@ const formatDate = (iso: string) =>
   new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
 const scoreClass = (s: number) => (s >= 80 ? "good" : s >= 60 ? "mid" : "low");
+const verdictClass = { pass: "good", borderline: "mid", reject: "low" } as const;
 
 onMounted(() => {
   loadHistory();
@@ -211,8 +247,20 @@ onMounted(() => {
 </script>
 
 <template>
+  <div class="tools" role="tablist">
+    <button :class="{ active: kind === 'quiz' }" role="tab" @click="kind = 'quiz'">
+      <strong>Quiz de práctica</strong>
+      <span>Preguntas sobre lo que pide el puesto</span>
+    </button>
+    <button :class="{ active: kind === 'ats' }" role="tab" @click="kind = 'ats'">
+      <strong>Filtro ATS</strong>
+      <span>Tu CV contra el puesto: dónde puede fallar</span>
+    </button>
+  </div>
+
   <section class="card">
-    <h2>Nuevo quiz</h2>
+    <h2>{{ kind === "ats" ? "Nuevo análisis ATS" : "Nuevo quiz" }}</h2>
+    <p v-if="kind === 'ats'" class="muted step-label">1. Requerimiento del puesto</p>
 
     <div class="tabs" role="tablist">
       <button :class="{ active: mode === 'file' }" role="tab" @click="mode = 'file'">Subir archivo</button>
@@ -245,15 +293,39 @@ onMounted(() => {
       placeholder="Pegá acá el aviso o la descripción del puesto…"
     ></textarea>
 
+    <template v-if="kind === 'ats'">
+      <p class="muted step-label cv-label">2. Tu CV</p>
+      <label
+        class="dropzone small-zone"
+        :class="{ dragging: cvDragging, filled: cv }"
+        @dragover.prevent="cvDragging = true"
+        @dragleave="cvDragging = false"
+        @drop.prevent="onCvDrop"
+      >
+        <input type="file" :accept="accepted.join(',')" hidden @change="onCvInput" />
+        <template v-if="cv">
+          <strong>{{ cv.name }}</strong>
+          <span class="muted">{{ (cv.size / 1024).toFixed(0) }} KB · hacé click para cambiarlo</span>
+        </template>
+        <template v-else>
+          <strong>Arrastrá tu CV acá o hacé click</strong>
+          <span class="muted">Mejor el mismo PDF que mandás a las empresas: también se revisa el formato</span>
+        </template>
+      </label>
+      <p class="muted privacy">
+        Tu CV queda solo en tu máquina (<code>data/</code>, fuera de git) y solo lo lee el motor elegido.
+      </p>
+    </template>
+
     <div class="options">
-      <div class="field">
+      <div v-if="kind === 'quiz'" class="field">
         <span class="label">Preguntas</span>
         <div class="segmented">
           <button v-for="c in counts" :key="c" :class="{ active: count === c }" @click="count = c">{{ c }}</button>
         </div>
       </div>
       <div class="field">
-        <span class="label">Idioma</span>
+        <span class="label">{{ kind === "ats" ? "Informe en" : "Idioma" }}</span>
         <div class="segmented">
           <button
             v-for="(label, key) in languageLabel"
@@ -265,7 +337,7 @@ onMounted(() => {
           </button>
         </div>
       </div>
-      <div class="field">
+      <div v-if="kind === 'quiz'" class="field">
         <span class="label">Dificultad</span>
         <div class="segmented">
           <button
@@ -315,10 +387,10 @@ onMounted(() => {
     </div>
 
     <button class="primary generate" :disabled="!canSubmit" @click="submit">
-      {{ submitting ? "Enviando…" : "Generar quiz" }}
+      {{ submitting ? "Enviando…" : kind === "ats" ? "Analizar CV" : "Generar quiz" }}
     </button>
     <p v-if="mode === 'text' && text.trim().length > 0 && text.trim().length < 40" class="muted hint">
-      El texto es muy corto para armar preguntas.
+      El texto es muy corto.
     </p>
     <p v-if="formError" class="error-box">{{ formError }}</p>
   </section>
@@ -326,12 +398,16 @@ onMounted(() => {
   <section class="card">
     <h2>Historial</h2>
     <p v-if="historyError" class="error-box">{{ historyError }}</p>
-    <p v-else-if="history.length === 0" class="muted">Todavía no generaste ningún quiz.</p>
+    <p v-else-if="history.length === 0" class="muted">Todavía no generaste ningún quiz ni análisis.</p>
     <ul v-else class="history">
       <li v-for="q in history" :key="q.id">
         <div class="info" :class="{ clickable: q.status !== 'error' }" @click="open(q)">
-          <div class="title">{{ q.title }}</div>
-          <div class="meta muted">
+          <div class="title"><span v-if="kindOf(q) === 'ats'" class="kind">ATS</span>{{ q.title }}</div>
+          <div v-if="kindOf(q) === 'ats'" class="meta muted">
+            {{ formatDate(q.createdAt) }} · CV: {{ q.cvSource }} · puesto: {{ q.source }} · {{ languageLabel[q.language] }}
+            <template v-if="q.engine"> · {{ engineLabel[q.engine] }}</template>
+          </div>
+          <div v-else class="meta muted">
             {{ formatDate(q.createdAt) }} · {{ q.count }} preguntas · {{ languageLabel[q.language] }} ·
             {{ difficultyLabel[q.difficulty] }} · {{ q.source }}
             <template v-if="q.engine"> · {{ engineLabel[q.engine] }}</template>
@@ -345,10 +421,18 @@ onMounted(() => {
         <div class="side">
           <span v-if="q.status === 'generating'" class="badge">Generando…</span>
           <span v-else-if="q.status === 'error'" class="badge bad">Error</span>
+          <span
+            v-else-if="q.ats"
+            class="score"
+            :class="verdictClass[q.ats.verdict]"
+            :title="verdictLabel[q.ats.verdict]"
+          >
+            {{ q.ats.score }}
+          </span>
           <span v-else-if="q.lastAttempt" class="score" :class="scoreClass(q.lastAttempt.score)">
             {{ Math.round(q.lastAttempt.score) }}%
           </span>
-          <span v-else class="badge">Sin rendir</span>
+          <span v-else-if="kindOf(q) === 'quiz'" class="badge">Sin rendir</span>
           <button v-if="q.status === 'ready'" class="small" @click="open(q)">Abrir</button>
           <button v-if="q.status !== 'generating'" class="small danger" @click="remove(q)">Borrar</button>
         </div>
@@ -358,6 +442,33 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.tools { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.tools button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+}
+.tools button span { color: var(--muted); font-size: 0.85rem; }
+.tools button.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.tools button.active strong { color: var(--accent); }
+.step-label { font-size: 0.85rem; font-weight: 600; margin: 0 0 8px; }
+.cv-label { margin-top: 16px; }
+.small-zone { min-height: 110px; }
+.privacy { font-size: 0.8rem; margin: 6px 0 0; }
+.kind {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 7px;
+  margin-right: 8px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  vertical-align: 2px;
+}
 .tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
 .tabs button {
   border: none;
@@ -442,6 +553,7 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .score.low { color: var(--bad); }
 
 @media (max-width: 560px) {
+  .tools { grid-template-columns: 1fr; }
   .history li { flex-direction: column; align-items: stretch; }
   .side { justify-content: flex-end; }
   .label { min-width: 100%; }
